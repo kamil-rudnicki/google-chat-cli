@@ -27,9 +27,7 @@ gchat chat dm send person@example.com --text "Hello"
 gchat chat threads spaces/AAAA
 gchat search "invoice"
 gchat search unread
-
-# Get all unread messages
-gchat search unread --all --max 5000
+gchat mark read
 
 # Show entire thread
 gchat chat messages spaces/AAAAJrp7YDg \
@@ -40,6 +38,22 @@ gchat chat messages spaces/AAAAJrp7YDg \
 gchat search "what is a status of project PROJ-328?" --all --max 5000 \
   | jq -r '.data.results[] | (.thread.name // .message.thread.name // empty)' \
   | sort -u
+
+# Get all unread messages
+gchat search unread --all --max 5000
+gchat search unread --include-marked --all --max 5000
+
+# Filter truly unread messages as Google API is beeing moody
+gchat search unread --include-marked --all --max 5000 \
+  | jq '.data.results |= map(select(.read == false)) | .meta.count = (.data.results | length)'
+
+# Stop showing the current unread backlog in future unread searches.
+# This stores a local cutoff; it doesn't change Google Chat thread read state.
+gchat mark read
+
+# Try Google's remote space read-state update as well.
+# This doesn't clear unread replies inside threads.
+gchat mark read --remote --all --max 5000
 ```
 
 ## Configure Google OAuth Client

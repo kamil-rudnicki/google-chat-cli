@@ -28,6 +28,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub verbose: bool,
 
+    #[arg(long, global = true)]
+    pub progress: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -43,6 +46,10 @@ pub enum Command {
         command: ChatCommand,
     },
     Search(SearchArgs),
+    Mark {
+        #[command(subcommand)]
+        command: MarkCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -155,7 +162,24 @@ pub struct ThreadsArgs {
     pub space_id: String,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum MarkCommand {
+    Read(MarkReadArgs),
+}
+
 #[derive(Debug, Args)]
+pub struct MarkReadArgs {
+    #[arg(long)]
+    pub space: Option<String>,
+
+    #[arg(long)]
+    pub remote: bool,
+
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args, Clone)]
 pub struct SearchArgs {
     #[arg(value_name = "QUERY", num_args = 1..)]
     pub query: Vec<String>,
@@ -177,6 +201,9 @@ pub struct SearchArgs {
 
     #[arg(long)]
     pub attachments: bool,
+
+    #[arg(long)]
+    pub include_marked: bool,
 
     #[arg(long, value_enum, default_value = "basic")]
     pub view: SearchView,
@@ -229,6 +256,7 @@ pub fn help_json() -> Value {
             "--page-token <token>",
             "--all",
             "--verbose",
+            "--progress",
             "--help",
             "--version"
         ],
@@ -245,7 +273,8 @@ pub fn help_json() -> Value {
             "chat dm send <email> --text <text>",
             "chat threads <space-id>",
             "search <query>",
-            "search unread"
+            "search unread",
+            "mark read"
         ]
     })
 }

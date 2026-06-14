@@ -1,6 +1,7 @@
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -85,6 +86,19 @@ pub struct ImportedCredentials {
     pub stored_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadBaseline {
+    pub unread_search_after: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadBaselinesFile {
+    accounts: BTreeMap<String, ReadBaseline>,
+}
+
 impl ConfigStore {
     pub fn new(root: PathBuf) -> Result<Self, AppError> {
         let store = Self { root };
@@ -125,6 +139,10 @@ impl ConfigStore {
 
     pub fn cache_dir(&self) -> PathBuf {
         self.root.join("cache")
+    }
+
+    pub fn read_baselines_path(&self) -> PathBuf {
+        self.cache_dir().join("read-baselines.json")
     }
 
     pub fn account_path(&self, email: &str) -> PathBuf {
@@ -356,6 +374,60 @@ impl ConfigStore {
         }
         accounts.sort_by(|left, right| left.email.cmp(&right.email));
         Ok(accounts)
+    }
+
+    pub fn load_unread_search_after(
+        &self,
+        email: &str,
+        command: &str,
+    ) -> Result<Option<String>, AppError> {
+        let baselines = self.load_read_baselines(command)?;
+        Ok(baselines
+            .accounts
+            .get(&normalize_email(email))
+            .map(|baseline| baseline.unread_search_after.clone()))
+    }
+
+    pub fn save_unread_search_after(
+        &self,
+        email: &str,
+        unread_search_after: &str,
+        command: &str,
+    ) -> Result<ReadBaseline, AppError> {
+        let mut baselines = self.load_read_baselines(command)?;
+        let baseline = ReadBaseline {
+            unread_search_after: unread_search_after.to_string(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        baselines
+            .accounts
+            .insert(normalize_email(email), baseline.clone());
+        write_json_restricted(&self.read_baselines_path(), &baselines, command)?;
+        Ok(baseline)
+    }
+
+    fn load_read_baselines(&self, command: &str) -> Result<ReadBaselinesFile, AppError> {
+        let path = self.read_baselines_path();
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ReadBaselinesFile::default());
+            }
+            Err(error) => {
+                return Err(AppError::local_io(
+                    command,
+                    "failed to read read-baselines file",
+                    json!({ "path": path, "ioError": error.to_string() }),
+                ));
+            }
+        };
+        serde_json::from_slice(&bytes).map_err(|error| {
+            AppError::local_io(
+                command,
+                "failed to parse read-baselines file",
+                json!({ "path": path, "jsonError": error.to_string() }),
+            )
+        })
     }
 
     pub fn remove_account(&self, email: &str) -> Result<bool, AppError> {

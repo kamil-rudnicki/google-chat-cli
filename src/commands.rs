@@ -1,12 +1,13 @@
 use crate::auth;
 use crate::cli::{
-    AuthCommand, ChatCommand, Cli, Command, DmCommand, ListSpacesArgs, MessagesArgs, SearchArgs,
-    SpacesCommand,
+    AuthCommand, ChatCommand, Cli, Command, DmCommand, ListSpacesArgs, MarkCommand, MarkReadArgs,
+    MessagesArgs, SearchArgs, SearchOrder, SearchView, SpacesCommand,
 };
 use crate::config::{ConfigStore, normalize_email};
 use crate::error::AppError;
 use crate::google::{ChatClient, MessageFilters};
-use crate::output::{SuccessEnvelope, success};
+use crate::output::{SuccessEnvelope, success, write_progress};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
@@ -18,6 +19,7 @@ pub async fn run(cli: Cli) -> Result<SuccessEnvelope, AppError> {
         Command::Auth { command } => run_auth(&store, command).await,
         Command::Chat { command } => run_chat(&store, &cli, command).await,
         Command::Search(args) => run_search(&store, &cli, args).await,
+        Command::Mark { command } => run_mark(&store, &cli, command).await,
     }
 }
 
@@ -112,6 +114,7 @@ async fn list_spaces(
             cli.page_token.as_deref(),
             cli.all,
             args.space_type.as_ref(),
+            cli.progress,
         )
         .await?;
     let count = page.items.len();
@@ -151,6 +154,7 @@ async fn list_messages(
                 after: args.after.clone(),
                 include_deleted: args.include_deleted,
             },
+            cli.progress,
         )
         .await?;
     let count = page.items.len();
@@ -245,6 +249,7 @@ async fn list_threads(
                 after: None,
                 include_deleted: false,
             },
+            cli.progress,
         )
         .await?;
     let threads = summarize_threads(&page.items);
@@ -276,11 +281,19 @@ async fn run_search(
     let unread = args.query.len() == 1 && args.query[0].eq_ignore_ascii_case("unread");
     let command = if unread { "search.unread" } else { "search" };
     let (account, client, scopes) = authenticated_client_with_scopes(store, cli, command).await?;
+    let mut local_unread_cutoff = None;
     if unread {
-        auth::require_scope(&scopes, auth::CHAT_READSTATE_READONLY, command)?;
+        auth::require_any_scope(
+            &scopes,
+            &[auth::CHAT_READSTATE_READONLY, auth::CHAT_READSTATE],
+            command,
+        )?;
+        if !args.include_marked {
+            local_unread_cutoff = store.load_unread_search_after(&account, command)?;
+        }
     }
 
-    let (page, filter, view, order) = client
+    let (mut page, filter, view, order) = client
         .search_messages(
             command,
             args,
@@ -288,8 +301,36 @@ async fn run_search(
             cli.page_token.as_deref(),
             cli.all,
             unread,
+            cli.progress,
         )
         .await?;
+    let local_unread_cutoff_applied =
+        unread && !args.include_marked && local_unread_cutoff.is_some() && args.after.is_none();
+    let mut local_unread_hidden_count = 0;
+    if local_unread_cutoff_applied {
+        let cutoff = local_unread_cutoff.as_deref().and_then(parse_rfc3339_utc);
+        if let Some(cutoff) = cutoff {
+            let mut saw_older_result = false;
+            page.items.retain(|result| {
+                let Some(create_time) =
+                    search_result_create_time(result).and_then(|value| parse_rfc3339_utc(&value))
+                else {
+                    return true;
+                };
+                if create_time < cutoff {
+                    local_unread_hidden_count += 1;
+                    saw_older_result = true;
+                    false
+                } else {
+                    true
+                }
+            });
+            if saw_older_result && matches!(order, SearchOrder::CreateTime) {
+                page.next_page_token = None;
+                page.truncated = false;
+            }
+        }
+    }
     let count = page.items.len();
     let next_page_token = page.next_page_token.clone();
     let truncated = page.truncated;
@@ -305,6 +346,9 @@ async fn run_search(
             "truncated": truncated,
             "previewApi": true,
             "filter": filter,
+            "localUnreadCutoff": local_unread_cutoff,
+            "localUnreadCutoffApplied": local_unread_cutoff_applied,
+            "localUnreadHiddenCount": local_unread_hidden_count,
             "view": view.api_value(),
             "orderBy": order.api_value(),
             "searchLimitations": [
@@ -314,6 +358,212 @@ async fn run_search(
         }),
     )
     .await)
+}
+
+async fn run_mark(
+    store: &ConfigStore,
+    cli: &Cli,
+    command: &MarkCommand,
+) -> Result<SuccessEnvelope, AppError> {
+    match command {
+        MarkCommand::Read(args) => mark_read(store, cli, args).await,
+    }
+}
+
+async fn mark_read(
+    store: &ConfigStore,
+    cli: &Cli,
+    args: &MarkReadArgs,
+) -> Result<SuccessEnvelope, AppError> {
+    let command = "mark.read";
+    let read_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    if args.space.is_some() && !args.remote {
+        return Err(AppError::usage(
+            command,
+            "`--space` only applies to `gchat mark read --remote`",
+            json!({ "fix": "drop `--space` for a local cutoff, or add `--remote`" }),
+        ));
+    }
+
+    let account = store.select_account(cli.account.as_deref(), command)?;
+    let remote_client = if args.remote {
+        let (_, client, scopes) = authenticated_client_with_scopes(store, cli, command).await?;
+        if args.dry_run {
+            auth::require_any_scope(
+                &scopes,
+                &[auth::CHAT_READSTATE_READONLY, auth::CHAT_READSTATE],
+                command,
+            )?;
+        } else {
+            auth::require_scope(&scopes, auth::CHAT_READSTATE, command)?;
+        }
+        Some(client)
+    } else {
+        None
+    };
+
+    let local_baseline = if args.dry_run {
+        None
+    } else {
+        Some(store.save_unread_search_after(&account, &read_at, command)?)
+    };
+
+    let mut remote_marked_spaces = Vec::new();
+    let mut remote_unread_result_count = 0;
+    let mut remote_top_level_result_count = 0;
+    let mut remote_thread_reply_result_count = 0;
+    let mut remote_already_read_result_count = 0;
+
+    if let Some(client) = remote_client {
+        let mut targets = if let Some(space) = args.space.as_deref() {
+            let space = crate::google::normalize_space_name(space)?;
+            let target = SpaceReadTarget {
+                space: space.clone(),
+                ..SpaceReadTarget::default()
+            };
+            BTreeMap::from([(space, target)])
+        } else {
+            unread_space_targets(&client, cli, command).await?
+        };
+
+        remote_unread_result_count = targets
+            .values()
+            .map(|target| target.unread_result_count)
+            .sum();
+        remote_top_level_result_count = targets
+            .values()
+            .map(|target| target.top_level_result_count)
+            .sum();
+        remote_thread_reply_result_count = targets
+            .values()
+            .map(|target| target.thread_reply_result_count)
+            .sum();
+        remote_already_read_result_count = targets
+            .values()
+            .map(|target| target.already_read_result_count)
+            .sum();
+
+        let total = targets.len();
+        for (index, target) in targets.values_mut().enumerate() {
+            let response = if args.dry_run {
+                None
+            } else {
+                Some(
+                    client
+                        .update_space_read_state(command, &target.space, &read_at)
+                        .await?,
+                )
+            };
+            remote_marked_spaces.push(target.to_json(&read_at, response));
+            if cli.progress {
+                write_progress(
+                    command,
+                    "mark.remote_space",
+                    index + 1,
+                    Some(total),
+                    json!({
+                        "dryRun": args.dry_run
+                    }),
+                );
+            }
+        }
+    } else {
+        if cli.progress {
+            write_progress(
+                command,
+                "mark.local_cutoff",
+                1,
+                Some(1),
+                json!({
+                    "dryRun": args.dry_run
+                }),
+            );
+        }
+    }
+
+    Ok(success(
+        command,
+        Some(account),
+        json!({
+            "localBaseline": local_baseline,
+            "remoteMarkedSpaces": remote_marked_spaces
+        }),
+        json!({
+            "count": remote_marked_spaces.len(),
+            "dryRun": args.dry_run,
+            "remote": args.remote,
+            "readAt": read_at,
+            "localUnreadCutoffStored": !args.dry_run,
+            "remoteUnreadResultCount": remote_unread_result_count,
+            "remoteTopLevelResultCount": remote_top_level_result_count,
+            "remoteThreadReplyResultCount": remote_thread_reply_result_count,
+            "remoteAlreadyReadResultCount": remote_already_read_result_count,
+            "updateMask": "lastReadTime",
+            "readStateLimitations": [
+                "local_cutoff_affects_gchat_search_unread_only",
+                "space_read_state_only",
+                "thread_replies_unaffected_by_space_read_state",
+                "search_api_does_not_return_all_message_types"
+            ]
+        }),
+    ))
+}
+
+async fn unread_space_targets(
+    client: &ChatClient,
+    cli: &Cli,
+    command: &str,
+) -> Result<BTreeMap<String, SpaceReadTarget>, AppError> {
+    let search_args = SearchArgs {
+        query: vec!["unread".to_string()],
+        space: None,
+        sender: None,
+        after: None,
+        before: None,
+        has_link: false,
+        attachments: false,
+        include_marked: true,
+        view: SearchView::Full,
+        order: SearchOrder::CreateTime,
+    };
+    let (page, _, _, _) = client
+        .search_messages(
+            command,
+            &search_args,
+            cli.max.or(Some(5000)),
+            cli.page_token.as_deref(),
+            true,
+            true,
+            cli.progress,
+        )
+        .await?;
+
+    let mut targets = BTreeMap::new();
+    for result in page.items {
+        let Some(space) = search_result_space_name(&result) else {
+            continue;
+        };
+        let target = targets
+            .entry(space.clone())
+            .or_insert_with(|| SpaceReadTarget {
+                space,
+                ..SpaceReadTarget::default()
+            });
+        target.unread_result_count += 1;
+        if search_result_read(&result) {
+            target.already_read_result_count += 1;
+        }
+        if search_result_is_thread_root(&result) {
+            target.top_level_result_count += 1;
+        } else {
+            target.thread_reply_result_count += 1;
+        }
+        target.latest_unread_create_time = max_string_option(
+            target.latest_unread_create_time.take(),
+            search_result_create_time(&result),
+        );
+    }
+    Ok(targets)
 }
 
 async fn authenticated_client(
@@ -421,6 +671,107 @@ fn summarize_threads(messages: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+#[derive(Default)]
+struct SpaceReadTarget {
+    space: String,
+    unread_result_count: usize,
+    top_level_result_count: usize,
+    thread_reply_result_count: usize,
+    already_read_result_count: usize,
+    latest_unread_create_time: Option<String>,
+}
+
+impl SpaceReadTarget {
+    fn to_json(&self, read_at: &str, response: Option<Value>) -> Value {
+        json!({
+            "space": {
+                "name": self.space
+            },
+            "readAt": read_at,
+            "unreadResultCount": self.unread_result_count,
+            "topLevelResultCount": self.top_level_result_count,
+            "threadReplyResultCount": self.thread_reply_result_count,
+            "alreadyReadResultCount": self.already_read_result_count,
+            "latestUnreadCreateTime": self.latest_unread_create_time,
+            "response": response,
+        })
+    }
+}
+
+fn search_result_message(result: &Value) -> &Value {
+    result.get("message").unwrap_or(result)
+}
+
+fn search_result_space_name(result: &Value) -> Option<String> {
+    let message = search_result_message(result);
+    if let Some(space) = message
+        .get("space")
+        .and_then(|space| space.get("name"))
+        .and_then(Value::as_str)
+    {
+        return Some(space.to_string());
+    }
+
+    message
+        .get("name")
+        .and_then(Value::as_str)
+        .and_then(|name| {
+            name.split_once("/messages/")
+                .map(|(space, _)| space.to_string())
+        })
+}
+
+fn search_result_create_time(result: &Value) -> Option<String> {
+    search_result_message(result)
+        .get("createTime")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn search_result_read(result: &Value) -> bool {
+    result.get("read").and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn search_result_is_thread_root(result: &Value) -> bool {
+    let message = search_result_message(result);
+    let Some(message_name) = message.get("name").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(thread_name) = message
+        .get("thread")
+        .and_then(|thread| thread.get("name"))
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    let Some(message_id) = message_name.split_once("/messages/").map(|(_, id)| id) else {
+        return false;
+    };
+    let Some(thread_id) = thread_name.split_once("/threads/").map(|(_, id)| id) else {
+        return false;
+    };
+    let mut parts = message_id.split('.');
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(left), Some(right), None) if left == thread_id && right == thread_id
+    )
+}
+
+fn max_string_option(left: Option<String>, right: Option<String>) -> Option<String> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +794,38 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0]["messageCount"], 2);
         assert_eq!(threads[0]["lastCreateTime"], "2026-01-02T00:00:00Z");
+    }
+
+    #[test]
+    fn detects_thread_root_search_results() {
+        let root = json!({
+            "message": {
+                "name": "spaces/A/messages/T.T",
+                "thread": { "name": "spaces/A/threads/T" }
+            }
+        });
+        let reply = json!({
+            "message": {
+                "name": "spaces/A/messages/T.R",
+                "thread": { "name": "spaces/A/threads/T" }
+            }
+        });
+
+        assert!(search_result_is_thread_root(&root));
+        assert!(!search_result_is_thread_root(&reply));
+    }
+
+    #[test]
+    fn extracts_space_from_search_result_message_name_fallback() {
+        let result = json!({
+            "message": {
+                "name": "spaces/A/messages/T.R"
+            }
+        });
+
+        assert_eq!(
+            search_result_space_name(&result),
+            Some("spaces/A".to_string())
+        );
     }
 }

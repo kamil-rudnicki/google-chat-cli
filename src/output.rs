@@ -1,6 +1,6 @@
 use crate::error::{AppError, ErrorBody};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::io::{self, Write};
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,6 +52,29 @@ pub fn write_error(error: &AppError) -> io::Result<()> {
     let mut handle = stderr.lock();
     serde_json::to_writer_pretty(&mut handle, &envelope)?;
     writeln!(handle)
+}
+
+pub fn write_progress(
+    command: &str,
+    stage: &str,
+    current: usize,
+    total: Option<usize>,
+    meta: Value,
+) {
+    let event = json!({
+        "ok": true,
+        "command": command,
+        "event": "progress",
+        "stage": stage,
+        "current": current,
+        "total": total,
+        "meta": meta,
+    });
+    if let Ok(line) = serde_json::to_string(&event) {
+        let stderr = io::stderr();
+        let mut handle = stderr.lock();
+        let _ = writeln!(handle, "{line}");
+    }
 }
 
 #[cfg(test)]

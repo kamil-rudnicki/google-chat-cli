@@ -19,17 +19,19 @@ pub const CHAT_MEMBERSHIPS_READONLY: &str =
     "https://www.googleapis.com/auth/chat.memberships.readonly";
 pub const CHAT_MESSAGES_READONLY: &str = "https://www.googleapis.com/auth/chat.messages.readonly";
 pub const CHAT_MESSAGES_CREATE: &str = "https://www.googleapis.com/auth/chat.messages.create";
+pub const CHAT_READSTATE: &str = "https://www.googleapis.com/auth/chat.users.readstate";
 pub const CHAT_READSTATE_READONLY: &str =
     "https://www.googleapis.com/auth/chat.users.readstate.readonly";
 pub const DIRECTORY_READONLY: &str = "https://www.googleapis.com/auth/directory.readonly";
 pub const DEFAULT_OAUTH_REDIRECT_URI: &str = "http://127.0.0.1:53682/callback";
 
-pub const REQUIRED_SCOPES: [&str; 7] = [
+pub const REQUIRED_SCOPES: [&str; 8] = [
     CHAT_SPACES_READONLY,
     CHAT_SPACES_CREATE,
     CHAT_MEMBERSHIPS_READONLY,
     CHAT_MESSAGES_READONLY,
     CHAT_MESSAGES_CREATE,
+    CHAT_READSTATE,
     CHAT_READSTATE_READONLY,
     DIRECTORY_READONLY,
 ];
@@ -201,6 +203,29 @@ pub fn require_scope(scopes: &[String], required: &str, command: &str) -> Result
         "authenticated account is missing a required OAuth scope",
         json!({
             "requiredScope": required,
+            "grantedScopes": scopes,
+            "fix": "run `gchat auth add <email>` again and approve the requested scopes"
+        }),
+    ))
+}
+
+pub fn require_any_scope(
+    scopes: &[String],
+    required: &[&str],
+    command: &str,
+) -> Result<(), AppError> {
+    if scopes
+        .iter()
+        .any(|scope| required.iter().any(|required| scope == required))
+    {
+        return Ok(());
+    }
+
+    Err(AppError::missing_auth(
+        command,
+        "authenticated account is missing a required OAuth scope",
+        json!({
+            "requiredScopes": required,
             "grantedScopes": scopes,
             "fix": "run `gchat auth add <email>` again and approve the requested scopes"
         }),

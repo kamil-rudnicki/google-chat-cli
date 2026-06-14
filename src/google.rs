@@ -1,5 +1,6 @@
 use crate::cli::{SearchArgs, SearchOrder, SearchView, SpaceType};
 use crate::error::AppError;
+use crate::output::write_progress;
 use reqwest::{Client, Method};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -78,11 +79,13 @@ impl ChatClient {
         page_token: Option<&str>,
         all: bool,
         space_type: Option<&SpaceType>,
+        progress: bool,
     ) -> Result<Page<Value>, AppError> {
         let limit = max.unwrap_or(100);
         let mut collected = Vec::new();
         let mut token = page_token.map(ToOwned::to_owned);
         let mut next_page_token = None;
+        let mut page_count = 0;
 
         loop {
             let remaining = limit.saturating_sub(collected.len());
@@ -110,6 +113,19 @@ impl ChatClient {
                 .get("nextPageToken")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
+            page_count += 1;
+            if progress {
+                write_progress(
+                    command,
+                    "list.page",
+                    collected.len(),
+                    Some(limit),
+                    json!({
+                        "pages": page_count,
+                        "hasNextPage": next_page_token.is_some()
+                    }),
+                );
+            }
 
             if !all || next_page_token.is_none() {
                 break;
@@ -133,12 +149,14 @@ impl ChatClient {
         page_token: Option<&str>,
         all: bool,
         filters: MessageFilters,
+        progress: bool,
     ) -> Result<Page<Value>, AppError> {
         let parent = normalize_space_name(space)?;
         let limit = max.unwrap_or(50);
         let mut collected = Vec::new();
         let mut token = page_token.map(ToOwned::to_owned);
         let mut next_page_token = None;
+        let mut page_count = 0;
 
         loop {
             let remaining = limit.saturating_sub(collected.len());
@@ -175,6 +193,19 @@ impl ChatClient {
                 .get("nextPageToken")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
+            page_count += 1;
+            if progress {
+                write_progress(
+                    command,
+                    "messages.page",
+                    collected.len(),
+                    Some(limit),
+                    json!({
+                        "pages": page_count,
+                        "hasNextPage": next_page_token.is_some()
+                    }),
+                );
+            }
 
             if !all || next_page_token.is_none() {
                 break;
@@ -213,6 +244,24 @@ impl ChatClient {
             Some(Value::Object(body)),
         )
         .await
+    }
+
+    pub async fn update_space_read_state(
+        &self,
+        command: &str,
+        space: &str,
+        last_read_time: &str,
+    ) -> Result<Value, AppError> {
+        let space = normalize_space_name(space)?;
+        let name = format!("users/me/{space}/spaceReadState");
+        let query = vec![("updateMask".to_string(), "lastReadTime".to_string())];
+        let body = json!({
+            "name": name,
+            "lastReadTime": last_read_time,
+        });
+
+        self.request_json(command, Method::PATCH, &name, query, Some(body))
+            .await
     }
 
     pub async fn find_or_create_dm(
@@ -271,6 +320,7 @@ impl ChatClient {
         page_token: Option<&str>,
         all: bool,
         unread: bool,
+        progress: bool,
     ) -> Result<(Page<Value>, String, SearchView, SearchOrder), AppError> {
         let query = if unread {
             "is_unread()".to_string()
@@ -288,6 +338,7 @@ impl ChatClient {
         let mut collected = Vec::new();
         let mut token = page_token.map(ToOwned::to_owned);
         let mut next_page_token = None;
+        let mut page_count = 0;
 
         loop {
             let remaining = limit.saturating_sub(collected.len());
@@ -323,6 +374,19 @@ impl ChatClient {
                 .get("nextPageToken")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
+            page_count += 1;
+            if progress {
+                write_progress(
+                    command,
+                    "search.page",
+                    collected.len(),
+                    Some(limit),
+                    json!({
+                        "pages": page_count,
+                        "hasNextPage": next_page_token.is_some()
+                    }),
+                );
+            }
 
             if !all || next_page_token.is_none() {
                 break;
@@ -842,6 +906,7 @@ mod tests {
             before: None,
             has_link: true,
             attachments: false,
+            include_marked: false,
             view: SearchView::Basic,
             order: SearchOrder::CreateTime,
         };
