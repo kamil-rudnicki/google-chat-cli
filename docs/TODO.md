@@ -1,4 +1,4 @@
 - [x] add display names for sender and space
 - [x] ability to get all messages for specific thread (example spaces/AAAAJrp7YDg/threads/3TAd8wa_By4)
 - [x] ability to hide the current unread backlog with a local cutoff (`gchat mark read`)
-- [ ] ability to get all unread messages exluding threads I don't follow
+- [x] ability to get all unread messages exluding threads I don't follow
