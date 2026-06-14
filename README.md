@@ -39,6 +39,9 @@ gchat search "what is a status of project PROJ-328?" --all --max 5000 \
   | jq -r '.data.results[] | (.thread.name // .message.thread.name // empty)' \
   | sort -u
 
+# Find matching messages and include the full threads they belong to
+gchat search "what is a status of project PROJ-328?" --expand-threads --all --max 5000
+
 # Get all unread messages
 gchat search unread --all --max 5000
 gchat search unread --include-marked --all --max 5000

@@ -208,6 +208,9 @@ pub struct SearchArgs {
     #[arg(long)]
     pub include_marked: bool,
 
+    #[arg(long)]
+    pub expand_threads: bool,
+
     #[arg(long, value_enum)]
     pub view: Option<SearchView>,
 

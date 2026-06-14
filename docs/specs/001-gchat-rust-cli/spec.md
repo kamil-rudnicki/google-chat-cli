@@ -400,8 +400,9 @@ Behavior:
 4. Max page size is 100.
 5. Default `orderBy` is `createTime desc`.
 6. Return results under `data.results`.
-7. Always include `meta.previewApi: true` because Google marks `spaces.messages.search` as Developer Preview.
-8. Always include `meta.searchLimitations` with a concise machine-readable list because the API does not return every message type.
+7. With `--expand-threads`, fetch every unique result thread with `messages.list` and return full thread payloads under `data.threads`.
+8. Always include `meta.previewApi: true` because Google marks `spaces.messages.search` as Developer Preview.
+9. Always include `meta.searchLimitations` with a concise machine-readable list because the API does not return every message type.
 
 Options:
 
@@ -413,6 +414,7 @@ Options:
 | `--before <rfc3339>` | Add `createTime < ...`. |
 | `--has-link` | Add `has_link()`. |
 | `--attachments` | Add `attachment:*`. |
+| `--expand-threads` | Fetch full messages for every unique result thread and include them under `data.threads`. |
 | `--view basic|full` | Map to `SEARCH_MESSAGES_VIEW_BASIC` or `SEARCH_MESSAGES_VIEW_FULL`. |
 | `--order createTime|relevance` | Use descending order only; reject ascending order. |
 

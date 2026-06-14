@@ -966,6 +966,7 @@ mod tests {
             has_link: true,
             attachments: false,
             include_marked: false,
+            expand_threads: false,
             view: Some(SearchView::Basic),
             order: SearchOrder::CreateTime,
         };

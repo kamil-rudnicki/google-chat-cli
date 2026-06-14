@@ -316,16 +316,31 @@ async fn run_search(
             }
         }
     }
+    let expanded_threads = if args.expand_threads {
+        expand_search_threads(&client, cli, command, &page.items).await?
+    } else {
+        Vec::new()
+    };
+    let expanded_thread_count = expanded_threads.len();
+    let expanded_thread_message_count = expanded_threads
+        .iter()
+        .filter_map(|thread| thread.get("messageCount").and_then(Value::as_u64))
+        .sum::<u64>();
     let count = page.items.len();
     let next_page_token = page.next_page_token.clone();
     let truncated = page.truncated;
+    let mut data = Map::new();
+    data.insert("results".to_string(), Value::Array(page.items));
+    if args.expand_threads {
+        data.insert("threads".to_string(), Value::Array(expanded_threads));
+    }
     Ok(chat_success(
         command,
         account,
         store,
         cli,
         &client,
-        json!({ "results": page.items }),
+        Value::Object(data),
         json!({
             "count": count,
             "nextPageToken": next_page_token,
@@ -337,6 +352,9 @@ async fn run_search(
             "localUnreadHiddenCount": local_unread_hidden_count,
             "view": view.api_value(),
             "orderBy": order.api_value(),
+            "expandedThreads": args.expand_threads,
+            "expandedThreadCount": expanded_thread_count,
+            "expandedThreadMessageCount": expanded_thread_message_count,
             "searchLimitations": [
                 "developer_preview_api",
                 "not_all_message_types_are_searchable"
@@ -507,6 +525,7 @@ async fn unread_space_targets(
         has_link: false,
         attachments: false,
         include_marked: true,
+        expand_threads: false,
         view: Some(SearchView::Full),
         order: SearchOrder::CreateTime,
     };
@@ -567,6 +586,125 @@ fn page_options_with_max(cli: &Cli, max: Option<usize>) -> PageOptions<'_> {
         all: cli.all,
         progress: cli.progress,
     }
+}
+
+fn thread_expansion_page_options(cli: &Cli) -> PageOptions<'_> {
+    PageOptions {
+        max: None,
+        page_token: None,
+        all: true,
+        progress: cli.progress,
+    }
+}
+
+async fn expand_search_threads(
+    client: &ChatClient,
+    cli: &Cli,
+    command: &str,
+    results: &[Value],
+) -> Result<Vec<Value>, AppError> {
+    let targets = collect_search_thread_targets(results);
+    let total = targets.len();
+    let mut threads = Vec::with_capacity(total);
+
+    for (index, target) in targets.into_iter().enumerate() {
+        let page = client
+            .list_messages(
+                command,
+                &target.space,
+                thread_expansion_page_options(cli),
+                MessageFilters {
+                    thread: Some(target.name.clone()),
+                    before: None,
+                    after: None,
+                    include_deleted: false,
+                },
+            )
+            .await?;
+        let message_count = page.items.len();
+        if cli.progress {
+            write_progress(
+                command,
+                "search.expand_thread",
+                index + 1,
+                Some(total),
+                json!({
+                    "thread": target.name.clone(),
+                    "messageCount": message_count,
+                    "resultCount": target.result_count,
+                    "truncated": page.truncated
+                }),
+            );
+        }
+        threads.push(json!({
+            "name": target.name,
+            "space": {
+                "name": target.space
+            },
+            "resultCount": target.result_count,
+            "messageCount": message_count,
+            "nextPageToken": page.next_page_token,
+            "truncated": page.truncated,
+            "messages": page.items
+        }));
+    }
+
+    Ok(threads)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchThreadTarget {
+    name: String,
+    space: String,
+    result_count: usize,
+}
+
+fn collect_search_thread_targets(results: &[Value]) -> Vec<SearchThreadTarget> {
+    let mut targets: Vec<SearchThreadTarget> = Vec::new();
+    let mut indexes: BTreeMap<String, usize> = BTreeMap::new();
+
+    for result in results {
+        let Some((space, thread)) = search_result_thread_target(result) else {
+            continue;
+        };
+        if let Some(index) = indexes.get(&thread).copied() {
+            targets[index].result_count += 1;
+            continue;
+        }
+
+        indexes.insert(thread.clone(), targets.len());
+        targets.push(SearchThreadTarget {
+            name: thread,
+            space,
+            result_count: 1,
+        });
+    }
+
+    targets
+}
+
+fn search_result_thread_target(result: &Value) -> Option<(String, String)> {
+    let message = search_result_message(result);
+    let raw_thread = message
+        .get("thread")
+        .and_then(|thread| thread.get("name"))
+        .and_then(Value::as_str)?;
+    let space = search_result_space_name(result).or_else(|| space_name_from_thread(raw_thread))?;
+    let thread = if raw_thread.starts_with("spaces/") {
+        raw_thread.to_string()
+    } else if raw_thread.starts_with("threads/") {
+        format!("{space}/{raw_thread}")
+    } else {
+        return None;
+    };
+    Some((space, thread))
+}
+
+fn space_name_from_thread(thread: &str) -> Option<String> {
+    thread
+        .split_once("/threads/")
+        .map(|(space, _)| space.to_string())
+        .filter(|space| space.starts_with("spaces/"))
 }
 
 async fn authenticated_client_with_scopes(
@@ -829,6 +967,66 @@ mod tests {
         assert_eq!(
             search_result_space_name(&result),
             Some("spaces/A".to_string())
+        );
+    }
+
+    #[test]
+    fn collects_unique_thread_targets_in_first_hit_order() {
+        let results = vec![
+            json!({
+                "message": {
+                    "name": "spaces/A/messages/1",
+                    "thread": { "name": "spaces/A/threads/T" }
+                }
+            }),
+            json!({
+                "message": {
+                    "space": { "name": "spaces/A" },
+                    "thread": { "name": "spaces/A/threads/T" }
+                }
+            }),
+            json!({
+                "name": "spaces/B/messages/2",
+                "thread": { "name": "spaces/B/threads/U" }
+            }),
+            json!({
+                "message": {
+                    "name": "spaces/C/messages/3"
+                }
+            }),
+        ];
+
+        let targets = collect_search_thread_targets(&results);
+
+        assert_eq!(
+            targets,
+            vec![
+                SearchThreadTarget {
+                    name: "spaces/A/threads/T".to_string(),
+                    space: "spaces/A".to_string(),
+                    result_count: 2,
+                },
+                SearchThreadTarget {
+                    name: "spaces/B/threads/U".to_string(),
+                    space: "spaces/B".to_string(),
+                    result_count: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn search_thread_target_expands_relative_thread_name() {
+        let result = json!({
+            "message": {
+                "space": { "name": "spaces/A" },
+                "thread": { "name": "threads/T" }
+            }
+        });
+
+        assert_eq!(
+            search_result_thread_target(&result),
+            Some(("spaces/A".to_string(), "spaces/A/threads/T".to_string()))
         );
     }
 }
