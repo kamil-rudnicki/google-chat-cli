@@ -523,7 +523,7 @@ async fn unread_space_targets(
         has_link: false,
         attachments: false,
         include_marked: true,
-        view: SearchView::Full,
+        view: Some(SearchView::Full),
         order: SearchOrder::CreateTime,
     };
     let (page, _, _, _) = client
@@ -603,7 +603,9 @@ async fn chat_success(
     mut data: Value,
     meta: Value,
 ) -> SuccessEnvelope {
-    client.enrich_display_names(&mut data).await;
+    if !cli.no_display_names {
+        client.enrich_display_names(&mut data).await;
+    }
     success(
         command,
         Some(account),

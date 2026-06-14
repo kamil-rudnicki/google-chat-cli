@@ -31,6 +31,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub progress: bool,
 
+    #[arg(long, global = true)]
+    pub no_display_names: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -205,8 +208,8 @@ pub struct SearchArgs {
     #[arg(long)]
     pub include_marked: bool,
 
-    #[arg(long, value_enum, default_value = "basic")]
-    pub view: SearchView,
+    #[arg(long, value_enum)]
+    pub view: Option<SearchView>,
 
     #[arg(long, value_enum, default_value = "create-time")]
     pub order: SearchOrder,
@@ -257,6 +260,7 @@ pub fn help_json() -> Value {
             "--all",
             "--verbose",
             "--progress",
+            "--no-display-names",
             "--help",
             "--version"
         ],

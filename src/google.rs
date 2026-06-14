@@ -81,14 +81,14 @@ impl ChatClient {
         space_type: Option<&SpaceType>,
         progress: bool,
     ) -> Result<Page<Value>, AppError> {
-        let limit = max.unwrap_or(100);
+        let limit = effective_limit(max, all, 100);
         let mut collected = Vec::new();
         let mut token = page_token.map(ToOwned::to_owned);
         let mut next_page_token = None;
         let mut page_count = 0;
 
         loop {
-            let remaining = limit.saturating_sub(collected.len());
+            let remaining = remaining_limit(limit, collected.len());
             if remaining == 0 {
                 break;
             }
@@ -119,7 +119,7 @@ impl ChatClient {
                     command,
                     "list.page",
                     collected.len(),
-                    Some(limit),
+                    limit,
                     json!({
                         "pages": page_count,
                         "hasNextPage": next_page_token.is_some()
@@ -133,7 +133,8 @@ impl ChatClient {
             token.clone_from(&next_page_token);
         }
 
-        let truncated = next_page_token.is_some() && (!all || collected.len() >= limit);
+        let truncated = next_page_token.is_some()
+            && (!all || limit.is_some_and(|limit| collected.len() >= limit));
         Ok(Page {
             items: collected,
             next_page_token,
@@ -152,14 +153,14 @@ impl ChatClient {
         progress: bool,
     ) -> Result<Page<Value>, AppError> {
         let parent = normalize_space_name(space)?;
-        let limit = max.unwrap_or(50);
+        let limit = effective_limit(max, all, 50);
         let mut collected = Vec::new();
         let mut token = page_token.map(ToOwned::to_owned);
         let mut next_page_token = None;
         let mut page_count = 0;
 
         loop {
-            let remaining = limit.saturating_sub(collected.len());
+            let remaining = remaining_limit(limit, collected.len());
             if remaining == 0 {
                 break;
             }
@@ -199,7 +200,7 @@ impl ChatClient {
                     command,
                     "messages.page",
                     collected.len(),
-                    Some(limit),
+                    limit,
                     json!({
                         "pages": page_count,
                         "hasNextPage": next_page_token.is_some()
@@ -213,7 +214,8 @@ impl ChatClient {
             token.clone_from(&next_page_token);
         }
 
-        let truncated = next_page_token.is_some() && (!all || collected.len() >= limit);
+        let truncated = next_page_token.is_some()
+            && (!all || limit.is_some_and(|limit| collected.len() >= limit));
         Ok(Page {
             items: collected,
             next_page_token,
@@ -328,20 +330,20 @@ impl ChatClient {
             args.query.join(" ")
         };
         let filter = compose_search_filter(&query, args)?;
-        let view = if unread {
+        let view = args.view.clone().unwrap_or(if unread {
             SearchView::Full
         } else {
-            args.view.clone()
-        };
+            SearchView::Basic
+        });
         let order = args.order.clone();
-        let limit = max.unwrap_or(25);
+        let limit = effective_limit(max, all, 25);
         let mut collected = Vec::new();
         let mut token = page_token.map(ToOwned::to_owned);
         let mut next_page_token = None;
         let mut page_count = 0;
 
         loop {
-            let remaining = limit.saturating_sub(collected.len());
+            let remaining = remaining_limit(limit, collected.len());
             if remaining == 0 {
                 break;
             }
@@ -380,7 +382,7 @@ impl ChatClient {
                     command,
                     "search.page",
                     collected.len(),
-                    Some(limit),
+                    limit,
                     json!({
                         "pages": page_count,
                         "hasNextPage": next_page_token.is_some()
@@ -394,7 +396,8 @@ impl ChatClient {
             token.clone_from(&next_page_token);
         }
 
-        let truncated = next_page_token.is_some() && (!all || collected.len() >= limit);
+        let truncated = next_page_token.is_some()
+            && (!all || limit.is_some_and(|limit| collected.len() >= limit));
         Ok((
             Page {
                 items: collected,
@@ -702,6 +705,20 @@ fn take_array(body: &Value, key: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+fn effective_limit(max: Option<usize>, all: bool, default: usize) -> Option<usize> {
+    match (max, all) {
+        (Some(max), _) => Some(max),
+        (None, true) => None,
+        (None, false) => Some(default),
+    }
+}
+
+fn remaining_limit(limit: Option<usize>, collected: usize) -> usize {
+    limit
+        .map(|limit| limit.saturating_sub(collected))
+        .unwrap_or(usize::MAX)
+}
+
 #[derive(Debug, Default)]
 struct DisplayNameTargets {
     spaces: Vec<String>,
@@ -907,7 +924,7 @@ mod tests {
             has_link: true,
             attachments: false,
             include_marked: false,
-            view: SearchView::Basic,
+            view: Some(SearchView::Basic),
             order: SearchOrder::CreateTime,
         };
         let filter = compose_search_filter("from(\"me\")", &args).unwrap();
@@ -1003,5 +1020,17 @@ mod tests {
             person_display_name(&person),
             Some("Ada Lovelace".to_string())
         );
+    }
+
+    #[test]
+    fn all_without_max_has_no_effective_limit() {
+        assert_eq!(effective_limit(None, true, 25), None);
+        assert_eq!(remaining_limit(None, 25), usize::MAX);
+    }
+
+    #[test]
+    fn max_still_caps_all_results() {
+        assert_eq!(effective_limit(Some(5000), true, 25), Some(5000));
+        assert_eq!(remaining_limit(Some(5000), 25), 4975);
     }
 }
