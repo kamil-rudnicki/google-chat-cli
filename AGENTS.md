@@ -1,0 +1,1 @@
+- don't install youself like ~/.local/bin/gchat or ask user explicity
