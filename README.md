@@ -50,7 +50,7 @@ gchat chat send --space spaces/AAAA --text "Hello"
 gchat chat dm space person@example.com
 gchat chat dm send person@example.com --text "Hello"
 gchat chat threads spaces/AAAA
-gchat search 'text:"invoice"'
+gchat search "invoice"
 gchat search unread
 ```
 
