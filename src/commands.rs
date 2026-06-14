@@ -88,6 +88,7 @@ async fn run_chat(
             Ok(chat_success(
                 "chat.send",
                 account,
+                store,
                 cli,
                 &client,
                 json!({ "message": message }),
@@ -123,6 +124,7 @@ async fn list_spaces(
     Ok(chat_success(
         command,
         account,
+        store,
         cli,
         &client,
         json!({ "spaces": page.items }),
@@ -163,6 +165,7 @@ async fn list_messages(
     Ok(chat_success(
         "chat.messages",
         account,
+        store,
         cli,
         &client,
         json!({ "messages": page.items }),
@@ -189,6 +192,7 @@ async fn run_dm(
             Ok(chat_success(
                 "chat.dm.space",
                 account,
+                store,
                 cli,
                 &client,
                 json!({ "space": space }),
@@ -220,6 +224,7 @@ async fn run_dm(
             Ok(chat_success(
                 "chat.dm.send",
                 account,
+                store,
                 cli,
                 &client,
                 json!({ "space": space, "message": message }),
@@ -260,6 +265,7 @@ async fn list_threads(
     Ok(chat_success(
         "chat.threads",
         account,
+        store,
         cli,
         &client,
         json!({ "threads": threads }),
@@ -337,6 +343,7 @@ async fn run_search(
     Ok(chat_success(
         command,
         account,
+        store,
         cli,
         &client,
         json!({ "results": page.items }),
@@ -598,13 +605,20 @@ fn verbose_meta(cli: &Cli, client: &ChatClient, mut meta: Value) -> Value {
 async fn chat_success(
     command: &str,
     account: String,
+    store: &ConfigStore,
     cli: &Cli,
     client: &ChatClient,
     mut data: Value,
     meta: Value,
 ) -> SuccessEnvelope {
     if !cli.no_display_names {
-        client.enrich_display_names(&mut data).await;
+        let mut cache = store.load_display_name_cache();
+        let cache_changed = client
+            .enrich_display_names(&mut data, Some(&mut cache))
+            .await;
+        if cache_changed {
+            let _ = store.save_display_name_cache(&cache, command);
+        }
     }
     success(
         command,

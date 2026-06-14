@@ -42,11 +42,13 @@ gchat search "what is a status of project PROJ-328?" --all --max 5000 \
 # Get all unread messages
 gchat search unread --all --max 5000
 gchat search unread --include-marked --all --max 5000
-gchat --no-display-names search unread --view basic --include-marked --all
 
 # Faster unread export: BASIC view omits read/mute metadata; no display-name
 # enrichment skips best-effort follow-up lookups.
 gchat --no-display-names search unread --view basic --include-marked --all
+
+# Display-name lookups are cached for 24h in:
+# ~/.config/gchat/cache/display-names.json
 
 # Filter truly unread messages as Google API is being moody
 gchat search unread --include-marked --all --max 5000 \

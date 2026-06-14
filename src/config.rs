@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -10,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 const CONFIG_SCHEMA_VERSION: u32 = 1;
+const DISPLAY_NAME_CACHE_SCHEMA_VERSION: u32 = 1;
+const DISPLAY_NAME_CACHE_TTL_HOURS: i64 = 24;
 #[cfg(target_os = "macos")]
 const SERVICE_NAME: &str = "gchat";
 
@@ -99,6 +102,69 @@ struct ReadBaselinesFile {
     accounts: BTreeMap<String, ReadBaseline>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayNameCacheEntry {
+    pub display_name: String,
+    pub cached_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayNameCache {
+    pub schema_version: u32,
+    pub entries: BTreeMap<String, DisplayNameCacheEntry>,
+}
+
+impl Default for DisplayNameCache {
+    fn default() -> Self {
+        Self {
+            schema_version: DISPLAY_NAME_CACHE_SCHEMA_VERSION,
+            entries: BTreeMap::new(),
+        }
+    }
+}
+
+impl DisplayNameCache {
+    pub fn fresh_display_name(&self, resource_name: &str, now: DateTime<Utc>) -> Option<String> {
+        let entry = self.entries.get(resource_name)?;
+        if entry.display_name.trim().is_empty() {
+            return None;
+        }
+        let cached_at = DateTime::parse_from_rfc3339(&entry.cached_at)
+            .ok()?
+            .with_timezone(&Utc);
+        if now.signed_duration_since(cached_at) > Duration::hours(DISPLAY_NAME_CACHE_TTL_HOURS) {
+            return None;
+        }
+        Some(entry.display_name.clone())
+    }
+
+    pub fn insert(&mut self, resource_name: String, display_name: String, now: DateTime<Utc>) {
+        self.schema_version = DISPLAY_NAME_CACHE_SCHEMA_VERSION;
+        self.entries.insert(
+            resource_name,
+            DisplayNameCacheEntry {
+                display_name,
+                cached_at: now.to_rfc3339(),
+            },
+        );
+    }
+
+    pub fn retain_fresh(&mut self, now: DateTime<Utc>) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|_, entry| {
+            DateTime::parse_from_rfc3339(&entry.cached_at)
+                .map(|cached_at| {
+                    now.signed_duration_since(cached_at.with_timezone(&Utc))
+                        <= Duration::hours(DISPLAY_NAME_CACHE_TTL_HOURS)
+                })
+                .unwrap_or(false)
+        });
+        before != self.entries.len()
+    }
+}
+
 impl ConfigStore {
     pub fn new(root: PathBuf) -> Result<Self, AppError> {
         let store = Self { root };
@@ -143,6 +209,10 @@ impl ConfigStore {
 
     pub fn read_baselines_path(&self) -> PathBuf {
         self.cache_dir().join("read-baselines.json")
+    }
+
+    pub fn display_name_cache_path(&self) -> PathBuf {
+        self.cache_dir().join("display-names.json")
     }
 
     pub fn account_path(&self, email: &str) -> PathBuf {
@@ -404,6 +474,22 @@ impl ConfigStore {
             .insert(normalize_email(email), baseline.clone());
         write_json_restricted(&self.read_baselines_path(), &baselines, command)?;
         Ok(baseline)
+    }
+
+    pub fn load_display_name_cache(&self) -> DisplayNameCache {
+        let path = self.display_name_cache_path();
+        let Ok(bytes) = fs::read(&path) else {
+            return DisplayNameCache::default();
+        };
+        serde_json::from_slice(&bytes).unwrap_or_default()
+    }
+
+    pub fn save_display_name_cache(
+        &self,
+        cache: &DisplayNameCache,
+        command: &str,
+    ) -> Result<(), AppError> {
+        write_json_restricted(&self.display_name_cache_path(), cache, command)
     }
 
     fn load_read_baselines(&self, command: &str) -> Result<ReadBaselinesFile, AppError> {
@@ -672,5 +758,30 @@ mod tests {
             normalize_email(" K.RUDNICKI@TIMECAMP.COM "),
             "k.rudnicki@timecamp.com"
         );
+    }
+
+    #[test]
+    fn display_name_cache_returns_fresh_entries() {
+        let now = Utc::now();
+        let mut cache = DisplayNameCache::default();
+        cache.insert("users/123".to_string(), "Ada Lovelace".to_string(), now);
+
+        assert_eq!(
+            cache.fresh_display_name("users/123", now),
+            Some("Ada Lovelace".to_string())
+        );
+    }
+
+    #[test]
+    fn display_name_cache_ignores_stale_entries() {
+        let now = Utc::now();
+        let mut cache = DisplayNameCache::default();
+        cache.insert(
+            "users/123".to_string(),
+            "Ada Lovelace".to_string(),
+            now - Duration::hours(25),
+        );
+
+        assert_eq!(cache.fresh_display_name("users/123", now), None);
     }
 }

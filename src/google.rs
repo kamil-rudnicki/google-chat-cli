@@ -1,6 +1,8 @@
 use crate::cli::{SearchArgs, SearchOrder, SearchView, SpaceType};
+use crate::config::DisplayNameCache;
 use crate::error::AppError;
 use crate::output::write_progress;
+use chrono::Utc;
 use reqwest::{Client, Method};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,31 +47,72 @@ impl ChatClient {
         &self.base_url
     }
 
-    pub async fn enrich_display_names(&self, value: &mut Value) {
+    pub async fn enrich_display_names(
+        &self,
+        value: &mut Value,
+        mut cache: Option<&mut DisplayNameCache>,
+    ) -> bool {
         let targets = collect_display_name_targets(value);
         if targets.is_empty() {
-            return;
+            return false;
         }
 
+        let now = Utc::now();
+        let mut cache_changed = false;
         let mut display_names = DisplayNames::default();
-        for space_name in &targets.spaces {
+        let mut missing_spaces = Vec::new();
+        let mut missing_users = Vec::new();
+        if let Some(cache) = cache.as_deref_mut() {
+            cache_changed |= cache.retain_fresh(now);
+            for space_name in &targets.spaces {
+                if let Some(display_name) = cache.fresh_display_name(space_name, now) {
+                    display_names
+                        .spaces
+                        .insert(space_name.clone(), display_name);
+                } else {
+                    missing_spaces.push(space_name.clone());
+                }
+            }
+            for user_name in &targets.users {
+                if let Some(display_name) = cache.fresh_display_name(user_name, now) {
+                    display_names.users.insert(user_name.clone(), display_name);
+                } else {
+                    missing_users.push(user_name.clone());
+                }
+            }
+        } else {
+            missing_spaces.clone_from(&targets.spaces);
+            missing_users.clone_from(&targets.users);
+        }
+
+        for space_name in &missing_spaces {
             let mut display_name = self.fetch_space_display_name(space_name).await;
             if display_name.is_none() && targets.space_member_fallbacks.contains(space_name) {
                 display_name = self.fetch_space_member_display_name(space_name).await;
             }
             if let Some(display_name) = display_name {
+                if let Some(cache) = cache.as_deref_mut() {
+                    cache.insert(space_name.clone(), display_name.clone(), now);
+                    cache_changed = true;
+                }
                 display_names
                     .spaces
                     .insert(space_name.clone(), display_name);
             }
         }
-        for chunk in targets.users.chunks(200) {
-            display_names
-                .users
-                .append(&mut self.fetch_user_display_names(chunk).await);
+        for chunk in missing_users.chunks(200) {
+            let fetched = self.fetch_user_display_names(chunk).await;
+            if let Some(cache) = cache.as_deref_mut() {
+                for (user_name, display_name) in &fetched {
+                    cache.insert(user_name.clone(), display_name.clone(), now);
+                    cache_changed = true;
+                }
+            }
+            display_names.users.extend(fetched);
         }
 
         apply_display_names(value, &display_names);
+        cache_changed
     }
 
     pub async fn list_spaces(
