@@ -5,7 +5,7 @@ use crate::cli::{
 };
 use crate::config::{ConfigStore, normalize_email};
 use crate::error::AppError;
-use crate::google::{ChatClient, MessageFilters};
+use crate::google::{ChatClient, MessageFilters, PageOptions};
 use crate::output::{SuccessEnvelope, success, write_progress};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value, json};
@@ -109,14 +109,7 @@ async fn list_spaces(
 ) -> Result<SuccessEnvelope, AppError> {
     let (account, client) = authenticated_client(store, cli, command).await?;
     let page = client
-        .list_spaces(
-            command,
-            cli.max,
-            cli.page_token.as_deref(),
-            cli.all,
-            args.space_type.as_ref(),
-            cli.progress,
-        )
+        .list_spaces(command, page_options(cli), args.space_type.as_ref())
         .await?;
     let count = page.items.len();
     let next_page_token = page.next_page_token.clone();
@@ -147,16 +140,13 @@ async fn list_messages(
         .list_messages(
             "chat.messages",
             &args.space_id,
-            cli.max,
-            cli.page_token.as_deref(),
-            cli.all,
+            page_options(cli),
             MessageFilters {
                 thread: args.thread.clone(),
                 before: args.before.clone(),
                 after: args.after.clone(),
                 include_deleted: args.include_deleted,
             },
-            cli.progress,
         )
         .await?;
     let count = page.items.len();
@@ -245,16 +235,13 @@ async fn list_threads(
         .list_messages(
             "chat.threads",
             &args.space_id,
-            cli.max.or(Some(200)),
-            cli.page_token.as_deref(),
-            cli.all,
+            page_options_with_max(cli, cli.max.or(Some(200))),
             MessageFilters {
                 thread: None,
                 before: None,
                 after: None,
                 include_deleted: false,
             },
-            cli.progress,
         )
         .await?;
     let threads = summarize_threads(&page.items);
@@ -300,15 +287,7 @@ async fn run_search(
     }
 
     let (mut page, filter, view, order) = client
-        .search_messages(
-            command,
-            args,
-            cli.max,
-            cli.page_token.as_deref(),
-            cli.all,
-            unread,
-            cli.progress,
-        )
+        .search_messages(command, args, page_options(cli), unread)
         .await?;
     let local_unread_cutoff_applied =
         unread && !args.include_marked && local_unread_cutoff.is_some() && args.after.is_none();
@@ -474,18 +453,16 @@ async fn mark_read(
                 );
             }
         }
-    } else {
-        if cli.progress {
-            write_progress(
-                command,
-                "mark.local_cutoff",
-                1,
-                Some(1),
-                json!({
-                    "dryRun": args.dry_run
-                }),
-            );
-        }
+    } else if cli.progress {
+        write_progress(
+            command,
+            "mark.local_cutoff",
+            1,
+            Some(1),
+            json!({
+                "dryRun": args.dry_run
+            }),
+        );
     }
 
     Ok(success(
@@ -537,11 +514,8 @@ async fn unread_space_targets(
         .search_messages(
             command,
             &search_args,
-            cli.max.or(Some(5000)),
-            cli.page_token.as_deref(),
+            page_options_with_max(cli, cli.max.or(Some(5000))),
             true,
-            true,
-            cli.progress,
         )
         .await?;
 
@@ -580,6 +554,19 @@ async fn authenticated_client(
 ) -> Result<(String, ChatClient), AppError> {
     let (account, client, _) = authenticated_client_with_scopes(store, cli, command).await?;
     Ok((account, client))
+}
+
+fn page_options(cli: &Cli) -> PageOptions<'_> {
+    page_options_with_max(cli, cli.max)
+}
+
+fn page_options_with_max(cli: &Cli, max: Option<usize>) -> PageOptions<'_> {
+    PageOptions {
+        max,
+        page_token: cli.page_token.as_deref(),
+        all: cli.all,
+        progress: cli.progress,
+    }
 }
 
 async fn authenticated_client_with_scopes(

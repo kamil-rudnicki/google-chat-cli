@@ -32,6 +32,14 @@ pub struct MessageFilters {
     pub include_deleted: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PageOptions<'a> {
+    pub max: Option<usize>,
+    pub page_token: Option<&'a str>,
+    pub all: bool,
+    pub progress: bool,
+}
+
 impl ChatClient {
     pub fn new(access_token: String) -> Self {
         let base_url =
@@ -118,15 +126,12 @@ impl ChatClient {
     pub async fn list_spaces(
         &self,
         command: &str,
-        max: Option<usize>,
-        page_token: Option<&str>,
-        all: bool,
+        page: PageOptions<'_>,
         space_type: Option<&SpaceType>,
-        progress: bool,
     ) -> Result<Page<Value>, AppError> {
-        let limit = effective_limit(max, all, 100);
+        let limit = effective_limit(page.max, page.all, 100);
         let mut collected = Vec::new();
-        let mut token = page_token.map(ToOwned::to_owned);
+        let mut token = page.page_token.map(ToOwned::to_owned);
         let mut next_page_token = None;
         let mut page_count = 0;
 
@@ -157,7 +162,7 @@ impl ChatClient {
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             page_count += 1;
-            if progress {
+            if page.progress {
                 write_progress(
                     command,
                     "list.page",
@@ -170,14 +175,14 @@ impl ChatClient {
                 );
             }
 
-            if !all || next_page_token.is_none() {
+            if !page.all || next_page_token.is_none() {
                 break;
             }
             token.clone_from(&next_page_token);
         }
 
         let truncated = next_page_token.is_some()
-            && (!all || limit.is_some_and(|limit| collected.len() >= limit));
+            && (!page.all || limit.is_some_and(|limit| collected.len() >= limit));
         Ok(Page {
             items: collected,
             next_page_token,
@@ -189,16 +194,13 @@ impl ChatClient {
         &self,
         command: &str,
         space: &str,
-        max: Option<usize>,
-        page_token: Option<&str>,
-        all: bool,
+        page: PageOptions<'_>,
         filters: MessageFilters,
-        progress: bool,
     ) -> Result<Page<Value>, AppError> {
         let parent = normalize_space_name(space)?;
-        let limit = effective_limit(max, all, 50);
+        let limit = effective_limit(page.max, page.all, 50);
         let mut collected = Vec::new();
-        let mut token = page_token.map(ToOwned::to_owned);
+        let mut token = page.page_token.map(ToOwned::to_owned);
         let mut next_page_token = None;
         let mut page_count = 0;
 
@@ -238,7 +240,7 @@ impl ChatClient {
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             page_count += 1;
-            if progress {
+            if page.progress {
                 write_progress(
                     command,
                     "messages.page",
@@ -251,14 +253,14 @@ impl ChatClient {
                 );
             }
 
-            if !all || next_page_token.is_none() {
+            if !page.all || next_page_token.is_none() {
                 break;
             }
             token.clone_from(&next_page_token);
         }
 
         let truncated = next_page_token.is_some()
-            && (!all || limit.is_some_and(|limit| collected.len() >= limit));
+            && (!page.all || limit.is_some_and(|limit| collected.len() >= limit));
         Ok(Page {
             items: collected,
             next_page_token,
@@ -361,11 +363,8 @@ impl ChatClient {
         &self,
         command: &str,
         args: &SearchArgs,
-        max: Option<usize>,
-        page_token: Option<&str>,
-        all: bool,
+        page: PageOptions<'_>,
         unread: bool,
-        progress: bool,
     ) -> Result<(Page<Value>, String, SearchView, SearchOrder), AppError> {
         let query = if unread {
             "is_unread()".to_string()
@@ -379,9 +378,9 @@ impl ChatClient {
             SearchView::Basic
         });
         let order = args.order.clone();
-        let limit = effective_limit(max, all, 25);
+        let limit = effective_limit(page.max, page.all, 25);
         let mut collected = Vec::new();
-        let mut token = page_token.map(ToOwned::to_owned);
+        let mut token = page.page_token.map(ToOwned::to_owned);
         let mut next_page_token = None;
         let mut page_count = 0;
 
@@ -420,7 +419,7 @@ impl ChatClient {
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             page_count += 1;
-            if progress {
+            if page.progress {
                 write_progress(
                     command,
                     "search.page",
@@ -433,14 +432,14 @@ impl ChatClient {
                 );
             }
 
-            if !all || next_page_token.is_none() {
+            if !page.all || next_page_token.is_none() {
                 break;
             }
             token.clone_from(&next_page_token);
         }
 
         let truncated = next_page_token.is_some()
-            && (!all || limit.is_some_and(|limit| collected.len() >= limit));
+            && (!page.all || limit.is_some_and(|limit| collected.len() >= limit));
         Ok((
             Page {
                 items: collected,
