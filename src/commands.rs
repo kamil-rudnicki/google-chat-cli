@@ -83,12 +83,15 @@ async fn run_chat(
             let message = client
                 .send_message("chat.send", &args.space, &args.text, args.thread.as_deref())
                 .await?;
-            Ok(success(
+            Ok(chat_success(
                 "chat.send",
-                Some(account),
+                account,
+                cli,
+                &client,
                 json!({ "message": message }),
-                verbose_meta(cli, &client, json!({})),
-            ))
+                json!({}),
+            )
+            .await)
         }
         ChatCommand::Dm { command } => run_dm(store, cli, command).await,
         ChatCommand::Threads(args) => list_threads(store, cli, args).await,
@@ -114,20 +117,19 @@ async fn list_spaces(
     let count = page.items.len();
     let next_page_token = page.next_page_token.clone();
     let truncated = page.truncated;
-    Ok(success(
+    Ok(chat_success(
         command,
-        Some(account),
+        account,
+        cli,
+        &client,
         json!({ "spaces": page.items }),
-        verbose_meta(
-            cli,
-            &client,
-            json!({
-                "count": count,
-                "nextPageToken": next_page_token,
-                "truncated": truncated
-            }),
-        ),
-    ))
+        json!({
+            "count": count,
+            "nextPageToken": next_page_token,
+            "truncated": truncated
+        }),
+    )
+    .await)
 }
 
 async fn list_messages(
@@ -154,20 +156,19 @@ async fn list_messages(
     let count = page.items.len();
     let next_page_token = page.next_page_token.clone();
     let truncated = page.truncated;
-    Ok(success(
+    Ok(chat_success(
         "chat.messages",
-        Some(account),
+        account,
+        cli,
+        &client,
         json!({ "messages": page.items }),
-        verbose_meta(
-            cli,
-            &client,
-            json!({
-                "count": count,
-                "nextPageToken": next_page_token,
-                "truncated": truncated
-            }),
-        ),
-    ))
+        json!({
+            "count": count,
+            "nextPageToken": next_page_token,
+            "truncated": truncated
+        }),
+    )
+    .await)
 }
 
 async fn run_dm(
@@ -181,12 +182,15 @@ async fn run_dm(
             let (space, action) = client
                 .find_or_create_dm("chat.dm.space", &args.email)
                 .await?;
-            Ok(success(
+            Ok(chat_success(
                 "chat.dm.space",
-                Some(account),
+                account,
+                cli,
+                &client,
                 json!({ "space": space }),
-                verbose_meta(cli, &client, json!({ "action": action })),
-            ))
+                json!({ "action": action }),
+            )
+            .await)
         }
         DmCommand::Send(args) => {
             let (account, client) = authenticated_client(store, cli, "chat.dm.send").await?;
@@ -209,12 +213,15 @@ async fn run_dm(
             let message = client
                 .send_message("chat.dm.send", space_name, &args.text, None)
                 .await?;
-            Ok(success(
+            Ok(chat_success(
                 "chat.dm.send",
-                Some(account),
+                account,
+                cli,
+                &client,
                 json!({ "space": space, "message": message }),
-                verbose_meta(cli, &client, json!({ "dmSpaceAction": action })),
-            ))
+                json!({ "dmSpaceAction": action }),
+            )
+            .await)
         }
     }
 }
@@ -245,21 +252,20 @@ async fn list_threads(
     let message_count = page.items.len();
     let next_page_token = page.next_page_token.clone();
     let truncated = page.truncated;
-    Ok(success(
+    Ok(chat_success(
         "chat.threads",
-        Some(account),
+        account,
+        cli,
+        &client,
         json!({ "threads": threads }),
-        verbose_meta(
-            cli,
-            &client,
-            json!({
-                "count": thread_count,
-                "messageCount": message_count,
-                "nextPageToken": next_page_token,
-                "truncated": truncated
-            }),
-        ),
-    ))
+        json!({
+            "count": thread_count,
+            "messageCount": message_count,
+            "nextPageToken": next_page_token,
+            "truncated": truncated
+        }),
+    )
+    .await)
 }
 
 async fn run_search(
@@ -287,28 +293,27 @@ async fn run_search(
     let count = page.items.len();
     let next_page_token = page.next_page_token.clone();
     let truncated = page.truncated;
-    Ok(success(
+    Ok(chat_success(
         command,
-        Some(account),
+        account,
+        cli,
+        &client,
         json!({ "results": page.items }),
-        verbose_meta(
-            cli,
-            &client,
-            json!({
-                "count": count,
-                "nextPageToken": next_page_token,
-                "truncated": truncated,
-                "previewApi": true,
-                "filter": filter,
-                "view": view.api_value(),
-                "orderBy": order.api_value(),
-                "searchLimitations": [
-                    "developer_preview_api",
-                    "not_all_message_types_are_searchable"
-                ]
-            }),
-        ),
-    ))
+        json!({
+            "count": count,
+            "nextPageToken": next_page_token,
+            "truncated": truncated,
+            "previewApi": true,
+            "filter": filter,
+            "view": view.api_value(),
+            "orderBy": order.api_value(),
+            "searchLimitations": [
+                "developer_preview_api",
+                "not_all_message_types_are_searchable"
+            ]
+        }),
+    )
+    .await)
 }
 
 async fn authenticated_client(
@@ -338,6 +343,23 @@ fn verbose_meta(cli: &Cli, client: &ChatClient, mut meta: Value) -> Value {
         object.insert("apiBase".to_string(), json!(client.base_url()));
     }
     meta
+}
+
+async fn chat_success(
+    command: &str,
+    account: String,
+    cli: &Cli,
+    client: &ChatClient,
+    mut data: Value,
+    meta: Value,
+) -> SuccessEnvelope {
+    client.enrich_display_names(&mut data).await;
+    success(
+        command,
+        Some(account),
+        data,
+        verbose_meta(cli, client, meta),
+    )
 }
 
 fn summarize_threads(messages: &[Value]) -> Vec<Value> {

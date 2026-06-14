@@ -1,0 +1,3 @@
+- [x] add display names for sender and space
+- [x] ability to get all messages for specific thread (example spaces/AAAAJrp7YDg/threads/3TAd8wa_By4)
+- [ ] ability to get all unread messages exluding threads I don't follow

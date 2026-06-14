@@ -1,4 +1,4 @@
-# gchat
+# Google Chat CLI
 
 `gchat` is a Rust CLI for Google Chat. It is script-first: successful commands print pretty JSON to stdout, failures print pretty JSON to stderr, and nothing prints ad-hoc terminal text.
 
@@ -13,6 +13,33 @@ gchat --version
 gchat auth credentials ~/Downloads/client_secret_....json
 gchat auth add you@example.com
 gchat chat list
+```
+
+## Use
+
+```bash
+gchat auth list
+gchat chat list
+gchat chat messages spaces/AAAA --max 10
+gchat chat send --space spaces/AAAA --text "Hello"
+gchat chat dm space person@example.com
+gchat chat dm send person@example.com --text "Hello"
+gchat chat threads spaces/AAAA
+gchat search "invoice"
+gchat search unread
+
+# Get all unread messages
+gchat search unread --all --max 5000
+
+# Show entire thread
+gchat chat messages spaces/AAAAJrp7YDg \
+  --thread spaces/AAAAJrp7YDg/threads/3TAd8wa_By4 \
+  --all
+
+# Find all threads that contain specific text
+gchat search "what is a status of project PROJ-328?" --all --max 5000 \
+  | jq -r '.data.results[] | (.thread.name // .message.thread.name // empty)' \
+  | sort -u
 ```
 
 ## Configure Google OAuth Client
@@ -32,7 +59,7 @@ Import a Google OAuth desktop-client JSON file:
 gchat auth credentials ~/Downloads/client_secret_....json
 ```
 
-Authorize an account:
+Then authorize an account:
 
 ```bash
 gchat auth add you@example.com
@@ -40,18 +67,8 @@ gchat auth add you@example.com
 
 The default config root is `~/.config/gchat`.
 
-## Use
-
-```bash
-gchat auth list
-gchat chat list
-gchat chat messages spaces/AAAA --max 10
-gchat chat send --space spaces/AAAA --text "Hello"
-gchat chat dm space person@example.com
-gchat chat dm send person@example.com --text "Hello"
-gchat chat threads spaces/AAAA
-gchat search "invoice"
-gchat search unread
-```
-
 Every command supports `--account <email>` when more than one account is configured.
+
+## Docs
+
+- [Developer notes](docs/DEVELOPER.md)

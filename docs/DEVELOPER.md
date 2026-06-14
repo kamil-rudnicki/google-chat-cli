@@ -26,6 +26,12 @@ echo 'export PATH="/Users/kamil/Developer/google-chat-cli/target/release:$PATH"'
 source ~/.zshrc
 ```
 
+## Build
+
+```bash
+cargo build --release
+```
+
 ## Install From Source
 
 ```bash

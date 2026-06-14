@@ -2,8 +2,10 @@ use crate::cli::{SearchArgs, SearchOrder, SearchView, SpaceType};
 use crate::error::AppError;
 use reqwest::{Client, Method};
 use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 
 const DEFAULT_API_BASE: &str = "https://chat.googleapis.com/v1";
+const DEFAULT_PEOPLE_API_BASE: &str = "https://people.googleapis.com/v1";
 
 #[derive(Debug, Clone)]
 pub struct ChatClient {
@@ -40,6 +42,33 @@ impl ChatClient {
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    pub async fn enrich_display_names(&self, value: &mut Value) {
+        let targets = collect_display_name_targets(value);
+        if targets.is_empty() {
+            return;
+        }
+
+        let mut display_names = DisplayNames::default();
+        for space_name in &targets.spaces {
+            let mut display_name = self.fetch_space_display_name(space_name).await;
+            if display_name.is_none() && targets.space_member_fallbacks.contains(space_name) {
+                display_name = self.fetch_space_member_display_name(space_name).await;
+            }
+            if let Some(display_name) = display_name {
+                display_names
+                    .spaces
+                    .insert(space_name.clone(), display_name);
+            }
+        }
+        for chunk in targets.users.chunks(200) {
+            display_names
+                .users
+                .append(&mut self.fetch_user_display_names(chunk).await);
+        }
+
+        apply_display_names(value, &display_names);
     }
 
     pub async fn list_spaces(
@@ -359,6 +388,133 @@ impl ChatClient {
 
         Ok(body)
     }
+
+    async fn fetch_space_display_name(&self, space_name: &str) -> Option<String> {
+        let url = format!("{}/{}", self.base_url, space_name);
+        let body = self.get_json_best_effort(url, Vec::new()).await?;
+        non_empty_string(body.get("displayName"))
+    }
+
+    async fn fetch_space_member_display_name(&self, space_name: &str) -> Option<String> {
+        let url = format!("{}/{space_name}/members", self.base_url);
+        let query = vec![
+            ("pageSize".to_string(), "20".to_string()),
+            ("filter".to_string(), "member.type = \"HUMAN\"".to_string()),
+        ];
+        let body = self.get_json_best_effort(url, query).await?;
+        let user_names: Vec<String> = body
+            .get("memberships")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|membership| {
+                membership
+                    .get("member")
+                    .and_then(|member| member.get("name"))
+                    .and_then(Value::as_str)
+                    .filter(|name| is_exact_user_resource_name(name))
+                    .map(ToOwned::to_owned)
+            })
+            .collect();
+        if user_names.is_empty() {
+            return None;
+        }
+
+        let display_names = self.fetch_user_display_names(&user_names).await;
+        let mut names: Vec<String> = user_names
+            .iter()
+            .filter_map(|user_name| display_names.get(user_name).cloned())
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+
+        let remaining = names.len().saturating_sub(5);
+        names.truncate(5);
+        if remaining > 0 {
+            names.push(format!("{remaining} more"));
+        }
+        Some(names.join(", "))
+    }
+
+    async fn fetch_user_display_names(&self, user_names: &[String]) -> BTreeMap<String, String> {
+        let user_names: Vec<&str> = user_names
+            .iter()
+            .filter_map(|name| {
+                let id = name.strip_prefix("users/")?;
+                if id == "app" {
+                    None
+                } else {
+                    Some(name.as_str())
+                }
+            })
+            .collect();
+        if user_names.is_empty() {
+            return BTreeMap::new();
+        }
+
+        let people_base = std::env::var("GCHAT_PEOPLE_API_BASE")
+            .unwrap_or_else(|_| DEFAULT_PEOPLE_API_BASE.to_string());
+        let url = format!("{}/people:batchGet", people_base.trim_end_matches('/'));
+        let mut query = vec![
+            ("personFields".to_string(), "names".to_string()),
+            (
+                "sources".to_string(),
+                "READ_SOURCE_TYPE_PROFILE".to_string(),
+            ),
+        ];
+        for user_name in &user_names {
+            if let Some(id) = user_name.strip_prefix("users/") {
+                query.push(("resourceNames".to_string(), format!("people/{id}")));
+            }
+        }
+
+        let Some(body) = self.get_json_best_effort(url, query).await else {
+            return BTreeMap::new();
+        };
+
+        let mut display_names = BTreeMap::new();
+        for response in body
+            .get("responses")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(person) = response.get("person") else {
+                continue;
+            };
+            let Some(resource_name) = person.get("resourceName").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(id) = resource_name.strip_prefix("people/") else {
+                continue;
+            };
+            let Some(display_name) = person_display_name(person) else {
+                continue;
+            };
+            display_names.insert(format!("users/{id}"), display_name);
+        }
+        display_names
+    }
+
+    async fn get_json_best_effort(
+        &self,
+        url: String,
+        query: Vec<(String, String)>,
+    ) -> Option<Value> {
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(&self.access_token)
+            .query(&query)
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        response.json::<Value>().await.ok()
+    }
 }
 
 pub fn normalize_space_name(input: &str) -> Result<String, AppError> {
@@ -482,6 +638,189 @@ fn take_array(body: &Value, key: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Default)]
+struct DisplayNameTargets {
+    spaces: Vec<String>,
+    space_member_fallbacks: Vec<String>,
+    users: Vec<String>,
+}
+
+impl DisplayNameTargets {
+    fn is_empty(&self) -> bool {
+        self.spaces.is_empty() && self.users.is_empty()
+    }
+}
+
+#[derive(Debug, Default)]
+struct DisplayNames {
+    spaces: BTreeMap<String, String>,
+    users: BTreeMap<String, String>,
+}
+
+fn collect_display_name_targets(value: &Value) -> DisplayNameTargets {
+    fn walk(
+        value: &Value,
+        parent_key: Option<&str>,
+        spaces: &mut BTreeSet<String>,
+        space_member_fallbacks: &mut BTreeSet<String>,
+        users: &mut BTreeSet<String>,
+    ) {
+        match value {
+            Value::Object(object) => {
+                if object_missing_display_name(object)
+                    && let Some(name) = object.get("name").and_then(Value::as_str)
+                {
+                    if is_exact_space_resource_name(name)
+                        && should_resolve_space_display_name(parent_key, object)
+                    {
+                        spaces.insert(name.to_string());
+                        if should_derive_space_display_name_from_members(parent_key, object) {
+                            space_member_fallbacks.insert(name.to_string());
+                        }
+                    } else if is_exact_user_resource_name(name) {
+                        users.insert(name.to_string());
+                    }
+                }
+                for (key, child) in object {
+                    walk(
+                        child,
+                        Some(key.as_str()),
+                        spaces,
+                        space_member_fallbacks,
+                        users,
+                    );
+                }
+            }
+            Value::Array(array) => {
+                for child in array {
+                    walk(child, parent_key, spaces, space_member_fallbacks, users);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut spaces = BTreeSet::new();
+    let mut space_member_fallbacks = BTreeSet::new();
+    let mut users = BTreeSet::new();
+    walk(
+        value,
+        None,
+        &mut spaces,
+        &mut space_member_fallbacks,
+        &mut users,
+    );
+    DisplayNameTargets {
+        spaces: spaces.into_iter().collect(),
+        space_member_fallbacks: space_member_fallbacks.into_iter().collect(),
+        users: users.into_iter().collect(),
+    }
+}
+
+fn apply_display_names(value: &mut Value, display_names: &DisplayNames) {
+    match value {
+        Value::Object(object) => {
+            if object_missing_display_name(object)
+                && let Some(name) = object.get("name").and_then(Value::as_str)
+            {
+                let display_name = if is_exact_space_resource_name(name) {
+                    display_names.spaces.get(name)
+                } else if is_exact_user_resource_name(name) {
+                    display_names.users.get(name)
+                } else {
+                    None
+                };
+                if let Some(display_name) = display_name {
+                    object.insert("displayName".to_string(), json!(display_name));
+                }
+            }
+            for child in object.values_mut() {
+                apply_display_names(child, display_names);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                apply_display_names(child, display_names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn object_missing_display_name(object: &Map<String, Value>) -> bool {
+    object
+        .get("displayName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+}
+
+fn should_resolve_space_display_name(
+    parent_key: Option<&str>,
+    object: &Map<String, Value>,
+) -> bool {
+    parent_key == Some("space") || is_compact_resource_object(object)
+}
+
+fn should_derive_space_display_name_from_members(
+    parent_key: Option<&str>,
+    object: &Map<String, Value>,
+) -> bool {
+    parent_key == Some("space") || is_compact_resource_object(object)
+}
+
+fn is_compact_resource_object(object: &Map<String, Value>) -> bool {
+    object
+        .keys()
+        .all(|key| matches!(key.as_str(), "name" | "displayName"))
+}
+
+fn is_exact_space_resource_name(name: &str) -> bool {
+    name.strip_prefix("spaces/")
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
+fn is_exact_user_resource_name(name: &str) -> bool {
+    name.strip_prefix("users/")
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
+fn non_empty_string(value: Option<&Value>) -> Option<String> {
+    value?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn person_display_name(person: &Value) -> Option<String> {
+    for name in person
+        .get("names")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(display_name) = non_empty_string(name.get("displayName")) {
+            return Some(display_name);
+        }
+        if let Some(unstructured_name) = non_empty_string(name.get("unstructuredName")) {
+            return Some(unstructured_name);
+        }
+        let given_name = non_empty_string(name.get("givenName"));
+        let family_name = non_empty_string(name.get("familyName"));
+        let combined = [given_name.as_deref(), family_name.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !combined.is_empty() {
+            return Some(combined);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,5 +850,93 @@ mod tests {
         assert!(filter.contains("space.name = \"spaces/AAAA\""));
         assert!(filter.contains("sender.name = \"users/person@example.com\""));
         assert!(filter.contains("has_link()"));
+    }
+
+    #[test]
+    fn display_name_targets_include_referenced_space_and_sender() {
+        let data = json!({
+            "results": [
+                {
+                    "message": {
+                        "name": "spaces/A/messages/M",
+                        "sender": {
+                            "name": "users/123",
+                            "type": "HUMAN"
+                        },
+                        "space": {
+                            "name": "spaces/A"
+                        },
+                        "thread": {
+                            "name": "spaces/A/threads/T"
+                        }
+                    }
+                }
+            ],
+            "spaces": [
+                {
+                    "name": "spaces/B",
+                    "spaceType": "DIRECT_MESSAGE",
+                    "spaceUri": "https://chat.google.com/dm/B"
+                }
+            ]
+        });
+
+        let targets = collect_display_name_targets(&data);
+
+        assert_eq!(targets.spaces, vec!["spaces/A"]);
+        assert_eq!(targets.space_member_fallbacks, vec!["spaces/A"]);
+        assert_eq!(targets.users, vec!["users/123"]);
+    }
+
+    #[test]
+    fn apply_display_names_adds_names_without_touching_message_resources() {
+        let mut data = json!({
+            "message": {
+                "name": "spaces/A/messages/M",
+                "sender": {
+                    "name": "users/123",
+                    "type": "HUMAN"
+                },
+                "space": {
+                    "name": "spaces/A"
+                }
+            }
+        });
+        let mut display_names = DisplayNames::default();
+        display_names
+            .spaces
+            .insert("spaces/A".to_string(), "Direct Person".to_string());
+        display_names
+            .users
+            .insert("users/123".to_string(), "Direct Person".to_string());
+
+        apply_display_names(&mut data, &display_names);
+
+        assert_eq!(
+            data["message"]["sender"]["displayName"],
+            json!("Direct Person")
+        );
+        assert_eq!(
+            data["message"]["space"]["displayName"],
+            json!("Direct Person")
+        );
+        assert!(data["message"].get("displayName").is_none());
+    }
+
+    #[test]
+    fn person_display_name_uses_best_available_name() {
+        let person = json!({
+            "names": [
+                {
+                    "givenName": "Ada",
+                    "familyName": "Lovelace"
+                }
+            ]
+        });
+
+        assert_eq!(
+            person_display_name(&person),
+            Some("Ada Lovelace".to_string())
+        );
     }
 }

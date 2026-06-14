@@ -15,18 +15,23 @@ use url::{Host, Url};
 
 pub const CHAT_SPACES_READONLY: &str = "https://www.googleapis.com/auth/chat.spaces.readonly";
 pub const CHAT_SPACES_CREATE: &str = "https://www.googleapis.com/auth/chat.spaces.create";
+pub const CHAT_MEMBERSHIPS_READONLY: &str =
+    "https://www.googleapis.com/auth/chat.memberships.readonly";
 pub const CHAT_MESSAGES_READONLY: &str = "https://www.googleapis.com/auth/chat.messages.readonly";
 pub const CHAT_MESSAGES_CREATE: &str = "https://www.googleapis.com/auth/chat.messages.create";
 pub const CHAT_READSTATE_READONLY: &str =
     "https://www.googleapis.com/auth/chat.users.readstate.readonly";
+pub const DIRECTORY_READONLY: &str = "https://www.googleapis.com/auth/directory.readonly";
 pub const DEFAULT_OAUTH_REDIRECT_URI: &str = "http://127.0.0.1:53682/callback";
 
-pub const REQUIRED_SCOPES: [&str; 5] = [
+pub const REQUIRED_SCOPES: [&str; 7] = [
     CHAT_SPACES_READONLY,
     CHAT_SPACES_CREATE,
+    CHAT_MEMBERSHIPS_READONLY,
     CHAT_MESSAGES_READONLY,
     CHAT_MESSAGES_CREATE,
     CHAT_READSTATE_READONLY,
+    DIRECTORY_READONLY,
 ];
 
 #[derive(Debug, Clone)]
