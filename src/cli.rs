@@ -142,6 +142,8 @@ pub struct SendArgs {
     #[arg(long)]
     pub text: String,
 
+    /// Reply in this thread: spaces/<space>/threads/<thread> or a bare thread id.
+    /// Fails with NOT_FOUND if the thread does not exist.
     #[arg(long)]
     pub thread: Option<String>,
 }

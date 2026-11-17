@@ -34,6 +34,11 @@ gchat chat messages spaces/AAAAJrp7YDg \
   --thread spaces/AAAAJrp7YDg/threads/3TAd8wa_By4 \
   --all
 
+# Reply in a thread (full thread name or bare thread id; fails if the thread does not exist)
+gchat chat send --space spaces/AAAAJrp7YDg \
+  --thread spaces/AAAAJrp7YDg/threads/3TAd8wa_By4 \
+  --text "Thanks, looking into it"
+
 # Find all threads that contain specific text
 gchat search "what is a status of project PROJ-328?" --all --max 5000 \
   | jq -r '.data.results[] | (.thread.name // .message.thread.name // empty)' \

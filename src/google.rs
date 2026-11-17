@@ -276,19 +276,14 @@ impl ChatClient {
         thread: Option<&str>,
     ) -> Result<Value, AppError> {
         validate_message_text(text)?;
-        let parent = normalize_space_name(space)?;
-        let mut body = Map::new();
-        body.insert("text".to_string(), json!(text));
-        if let Some(thread) = thread {
-            body.insert("thread".to_string(), json!({ "name": thread }));
-        }
+        let request = build_send_message_request(space, text, thread)?;
 
         self.request_json(
             command,
             Method::POST,
-            &format!("{parent}/messages"),
-            Vec::new(),
-            Some(Value::Object(body)),
+            &request.path,
+            request.query,
+            Some(request.body),
         )
         .await
     }
@@ -649,6 +644,75 @@ pub fn normalize_space_name(input: &str) -> Result<String, AppError> {
     }
 }
 
+/// Google Chat ignores `thread.name` unless `messageReplyOption` is set, so
+/// replies always carry it. `REPLY_MESSAGE_OR_FAIL` returns NOT_FOUND for an
+/// unknown thread instead of silently starting a new top-level thread.
+const THREAD_REPLY_OPTION: &str = "REPLY_MESSAGE_OR_FAIL";
+
+#[derive(Debug, PartialEq)]
+struct SendMessageRequest {
+    path: String,
+    query: Vec<(String, String)>,
+    body: Value,
+}
+
+fn build_send_message_request(
+    space: &str,
+    text: &str,
+    thread: Option<&str>,
+) -> Result<SendMessageRequest, AppError> {
+    let parent = normalize_space_name(space)?;
+    let mut body = Map::new();
+    body.insert("text".to_string(), json!(text));
+    let mut query = Vec::new();
+    if let Some(thread) = thread {
+        let thread_name = normalize_thread_name(&parent, thread)?;
+        body.insert("thread".to_string(), json!({ "name": thread_name }));
+        query.push((
+            "messageReplyOption".to_string(),
+            THREAD_REPLY_OPTION.to_string(),
+        ));
+    }
+
+    Ok(SendMessageRequest {
+        path: format!("{parent}/messages"),
+        query,
+        body: Value::Object(body),
+    })
+}
+
+/// Accepts a full thread name (`spaces/AAAA/threads/BBBB`) or a bare thread id
+/// (`BBBB`) and returns the full name within `parent_space`.
+pub fn normalize_thread_name(parent_space: &str, input: &str) -> Result<String, AppError> {
+    let input = input.trim();
+    let invalid = |message: &str| {
+        AppError::usage(
+            "chat",
+            message,
+            json!({ "space": parent_space, "thread": input }),
+        )
+    };
+    if input.is_empty() {
+        return Err(invalid("thread id is empty"));
+    }
+    if input.contains('?') || input.contains('#') || input.contains(' ') {
+        return Err(invalid("thread id contains invalid characters"));
+    }
+    let thread_id = match input.strip_prefix("spaces/") {
+        Some(_) => input
+            .strip_prefix(parent_space)
+            .and_then(|rest| rest.strip_prefix("/threads/"))
+            .ok_or_else(|| invalid("thread does not belong to the given space"))?,
+        None => input,
+    };
+    if thread_id.is_empty() || thread_id.contains('/') {
+        return Err(invalid(
+            "thread must be a thread id or spaces/<space>/threads/<thread>",
+        ));
+    }
+    Ok(format!("{parent_space}/threads/{thread_id}"))
+}
+
 pub fn compose_search_filter(query: &str, args: &SearchArgs) -> Result<String, AppError> {
     let mut filters = vec![query.trim().to_string()];
     if filters[0].is_empty() {
@@ -953,6 +1017,69 @@ mod tests {
     fn normalizes_raw_space_id() {
         assert_eq!(normalize_space_name("AAAA").unwrap(), "spaces/AAAA");
         assert_eq!(normalize_space_name("spaces/AAAA").unwrap(), "spaces/AAAA");
+    }
+
+    #[test]
+    fn send_without_thread_starts_new_thread() {
+        let request = build_send_message_request("AAAA", "hello", None).unwrap();
+
+        assert_eq!(
+            request,
+            SendMessageRequest {
+                path: "spaces/AAAA/messages".to_string(),
+                query: Vec::new(),
+                body: json!({ "text": "hello" }),
+            }
+        );
+    }
+
+    #[test]
+    fn send_with_thread_sets_reply_option() {
+        let request =
+            build_send_message_request("spaces/AAAA", "hello", Some("spaces/AAAA/threads/T1"))
+                .unwrap();
+
+        assert_eq!(
+            request,
+            SendMessageRequest {
+                path: "spaces/AAAA/messages".to_string(),
+                query: vec![(
+                    "messageReplyOption".to_string(),
+                    "REPLY_MESSAGE_OR_FAIL".to_string()
+                )],
+                body: json!({ "text": "hello", "thread": { "name": "spaces/AAAA/threads/T1" } }),
+            }
+        );
+    }
+
+    #[test]
+    fn thread_name_accepts_full_name_or_bare_id() {
+        assert_eq!(
+            normalize_thread_name("spaces/AAAA", "spaces/AAAA/threads/T1").unwrap(),
+            "spaces/AAAA/threads/T1"
+        );
+        assert_eq!(
+            normalize_thread_name("spaces/AAAA", " T1 ").unwrap(),
+            "spaces/AAAA/threads/T1"
+        );
+    }
+
+    #[test]
+    fn thread_name_rejects_other_space_and_malformed_input() {
+        for input in [
+            "",
+            "spaces/BBBB/threads/T1",
+            "spaces/AAAAB/threads/T1",
+            "spaces/AAAA/threads/",
+            "spaces/AAAA/messages/M1",
+            "threads/T1",
+            "T1?x",
+        ] {
+            assert!(
+                normalize_thread_name("spaces/AAAA", input).is_err(),
+                "expected error for {input:?}"
+            );
+        }
     }
 
     #[test]
