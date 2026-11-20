@@ -2,7 +2,7 @@ class Gchat < Formula
   desc "Script-first Google Chat CLI"
   homepage "https://github.com/kamil-rudnicki/google-chat-cli"
   license "MIT"
-  head "file:///Users/kamil/Developer/google-chat-cli", branch: "main"
+  head "https://github.com/kamil-rudnicki/google-chat-cli.git", branch: "main"
 
   depends_on "rust" => :build
 

@@ -1,1 +1,7 @@
 /target
+__pycache__/
+oauth-client.json
+client_secret_*.json
+/accounts/
+read-later.sqlite3*
+read-later-cron.log

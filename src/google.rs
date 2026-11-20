@@ -294,15 +294,45 @@ impl ChatClient {
         space: &str,
         last_read_time: &str,
     ) -> Result<Value, AppError> {
-        let space = normalize_space_name(space)?;
-        let name = format!("users/me/{space}/spaceReadState");
+        let name = read_state_name(space, None)?;
+        self.update_read_state(command, &name, last_read_time).await
+    }
+
+    pub async fn update_thread_read_state(
+        &self,
+        command: &str,
+        space: &str,
+        thread: &str,
+        last_read_time: &str,
+    ) -> Result<Value, AppError> {
+        let name = read_state_name(space, Some(thread))?;
+        self.update_read_state(command, &name, last_read_time).await
+    }
+
+    pub async fn get_read_state(
+        &self,
+        command: &str,
+        space: &str,
+        thread: Option<&str>,
+    ) -> Result<Value, AppError> {
+        let name = read_state_name(space, thread)?;
+        self.request_json(command, Method::GET, &name, Vec::new(), None)
+            .await
+    }
+
+    async fn update_read_state(
+        &self,
+        command: &str,
+        name: &str,
+        last_read_time: &str,
+    ) -> Result<Value, AppError> {
         let query = vec![("updateMask".to_string(), "lastReadTime".to_string())];
         let body = json!({
             "name": name,
             "lastReadTime": last_read_time,
         });
 
-        self.request_json(command, Method::PATCH, &name, query, Some(body))
+        self.request_json(command, Method::PATCH, name, query, Some(body))
             .await
     }
 
@@ -679,6 +709,17 @@ fn build_send_message_request(
         query,
         body: Value::Object(body),
     })
+}
+
+fn read_state_name(space: &str, thread: Option<&str>) -> Result<String, AppError> {
+    let space = normalize_space_name(space)?;
+    match thread {
+        Some(thread) => {
+            let thread = normalize_thread_name(&space, thread)?;
+            Ok(format!("users/me/{thread}/threadReadState"))
+        }
+        None => Ok(format!("users/me/{space}/spaceReadState")),
+    }
 }
 
 /// Accepts a full thread name (`spaces/AAAA/threads/BBBB`) or a bare thread id

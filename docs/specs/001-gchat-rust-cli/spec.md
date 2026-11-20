@@ -180,10 +180,10 @@ Success example:
   "ok": true,
   "command": "auth.credentials",
   "data": {
-    "configDir": "/Users/kamil/.config/gchat",
+    "configDir": "/home/example/.config/gchat",
     "clientId": "redacted.apps.googleusercontent.com",
-    "source": "/Users/kamil/Downloads/client_secret_123.json",
-    "storedAt": "/Users/kamil/.config/gchat/oauth-client.json"
+    "source": "/home/example/Downloads/client_secret_example.json",
+    "storedAt": "/home/example/.config/gchat/oauth-client.json"
   },
   "meta": {
     "credentialSecretStored": true

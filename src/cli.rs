@@ -49,10 +49,20 @@ pub enum Command {
         command: ChatCommand,
     },
     Search(SearchArgs),
+    Home {
+        #[command(subcommand)]
+        command: HomeCommand,
+    },
     Mark {
         #[command(subcommand)]
         command: MarkCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HomeCommand {
+    Unread,
+    Setup,
 }
 
 #[derive(Debug, Subcommand)]
@@ -87,6 +97,18 @@ pub enum ChatCommand {
         command: DmCommand,
     },
     Threads(ThreadsArgs),
+    ReadState(ReadStateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ReadStateArgs {
+    pub space_id: String,
+
+    #[arg(long)]
+    pub thread: Option<String>,
+
+    #[arg(long)]
+    pub last_read_time: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -179,6 +201,9 @@ pub struct MarkReadArgs {
 
     #[arg(long)]
     pub remote: bool,
+
+    #[arg(long, requires = "remote", conflicts_with = "space")]
+    pub include_threads: bool,
 
     #[arg(long)]
     pub dry_run: bool,
@@ -281,8 +306,11 @@ pub fn help_json() -> Value {
             "chat dm space <email>",
             "chat dm send <email> --text <text>",
             "chat threads <space-id>",
+            "chat read-state <space-id> [--thread <thread-id>] [--last-read-time <timestamp>]",
             "search <query>",
             "search unread",
+            "home unread",
+            "home setup",
             "mark read"
         ]
     })

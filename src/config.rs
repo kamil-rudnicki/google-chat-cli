@@ -754,10 +754,7 @@ mod tests {
 
     #[test]
     fn normalizes_email_lowercase() {
-        assert_eq!(
-            normalize_email(" K.RUDNICKI@TIMECAMP.COM "),
-            "k.rudnicki@timecamp.com"
-        );
+        assert_eq!(normalize_email(" YOU@EXAMPLE.COM "), "you@example.com");
     }
 
     #[test]

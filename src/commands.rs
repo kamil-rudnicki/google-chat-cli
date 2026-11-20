@@ -1,15 +1,15 @@
 use crate::auth;
 use crate::cli::{
     AuthCommand, ChatCommand, Cli, Command, DmCommand, ListSpacesArgs, MarkCommand, MarkReadArgs,
-    MessagesArgs, SearchArgs, SearchOrder, SearchView, SpacesCommand,
+    MessagesArgs, ReadStateArgs, SearchArgs, SearchOrder, SearchView, SpacesCommand,
 };
 use crate::config::{ConfigStore, normalize_email};
 use crate::error::AppError;
-use crate::google::{ChatClient, MessageFilters, PageOptions};
+use crate::google::{ChatClient, MessageFilters, Page, PageOptions};
 use crate::output::{SuccessEnvelope, success, write_progress};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub async fn run(cli: Cli) -> Result<SuccessEnvelope, AppError> {
     let root = ConfigStore::resolve_root(cli.config_dir.clone())?;
@@ -19,6 +19,7 @@ pub async fn run(cli: Cli) -> Result<SuccessEnvelope, AppError> {
         Command::Auth { command } => run_auth(&store, command).await,
         Command::Chat { command } => run_chat(&store, &cli, command).await,
         Command::Search(args) => run_search(&store, &cli, args).await,
+        Command::Home { command } => crate::home::run(&store, &cli, command),
         Command::Mark { command } => run_mark(&store, &cli, command).await,
     }
 }
@@ -98,7 +99,50 @@ async fn run_chat(
         }
         ChatCommand::Dm { command } => run_dm(store, cli, command).await,
         ChatCommand::Threads(args) => list_threads(store, cli, args).await,
+        ChatCommand::ReadState(args) => chat_read_state(store, cli, args).await,
     }
+}
+
+async fn chat_read_state(
+    store: &ConfigStore,
+    cli: &Cli,
+    args: &ReadStateArgs,
+) -> Result<SuccessEnvelope, AppError> {
+    let command = "chat.read_state";
+    let (account, client, scopes) = authenticated_client_with_scopes(store, cli, command).await?;
+    let thread = args.thread.as_deref();
+    let state = if let Some(time) = args.last_read_time.as_deref() {
+        auth::require_scope(&scopes, auth::CHAT_READSTATE, command)?;
+        if !parse_rfc3339_utc(time).is_some_and(|time| time.timestamp() >= 0) {
+            return Err(AppError::usage(
+                command,
+                "Expected a nonnegative RFC 3339 timestamp",
+                json!({}),
+            ));
+        }
+        match thread {
+            Some(thread) => {
+                client
+                    .update_thread_read_state(command, &args.space_id, thread, time)
+                    .await?
+            }
+            None => {
+                client
+                    .update_space_read_state(command, &args.space_id, time)
+                    .await?
+            }
+        }
+    } else {
+        auth::require_any_scope(
+            &scopes,
+            &[auth::CHAT_READSTATE_READONLY, auth::CHAT_READSTATE],
+            command,
+        )?;
+        client
+            .get_read_state(command, &args.space_id, thread)
+            .await?
+    };
+    Ok(success(command, Some(account), state, json!({})))
 }
 
 async fn list_spaces(
@@ -401,6 +445,17 @@ async fn mark_read(
         } else {
             auth::require_scope(&scopes, auth::CHAT_READSTATE, command)?;
         }
+        if args.include_threads {
+            return mark_unread_spaces_and_threads(
+                &client,
+                cli,
+                command,
+                account,
+                &read_at,
+                args.dry_run,
+            )
+            .await;
+        }
         Some(client)
     } else {
         None
@@ -516,27 +571,12 @@ async fn unread_space_targets(
     cli: &Cli,
     command: &str,
 ) -> Result<BTreeMap<String, SpaceReadTarget>, AppError> {
-    let search_args = SearchArgs {
-        query: vec!["unread".to_string()],
-        space: None,
-        sender: None,
-        after: None,
-        before: None,
-        has_link: false,
-        attachments: false,
-        include_marked: true,
-        expand_threads: false,
-        view: Some(SearchView::Full),
-        order: SearchOrder::CreateTime,
-    };
-    let (page, _, _, _) = client
-        .search_messages(
-            command,
-            &search_args,
-            page_options_with_max(cli, cli.max.or(Some(5000))),
-            true,
-        )
-        .await?;
+    let page = unread_search(
+        client,
+        command,
+        page_options_with_max(cli, cli.max.or(Some(5000))),
+    )
+    .await?;
 
     let mut targets = BTreeMap::new();
     for result in page.items {
@@ -564,6 +604,173 @@ async fn unread_space_targets(
         );
     }
     Ok(targets)
+}
+
+async fn mark_unread_spaces_and_threads(
+    client: &ChatClient,
+    cli: &Cli,
+    command: &str,
+    account: String,
+    read_at: &str,
+    dry_run: bool,
+) -> Result<SuccessEnvelope, AppError> {
+    let mut options = page_options(cli);
+    options.all = true;
+    let page = unread_search(client, command, options).await?;
+    let mut spaces = BTreeSet::new();
+    let mut threads = BTreeSet::new();
+    for result in page.items {
+        if result.get("read").and_then(Value::as_bool) != Some(false) {
+            continue;
+        }
+        if search_result_message(&result)
+            .get("threadReply")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            let target = search_result_thread_target(&result).ok_or_else(|| {
+                AppError::google_api(
+                    command,
+                    200,
+                    json!({ "message": "Unread reply is missing its thread name" }),
+                )
+            })?;
+            threads.insert(target);
+        } else {
+            let space = search_result_space_name(&result).ok_or_else(|| {
+                AppError::google_api(
+                    command,
+                    200,
+                    json!({ "message": "Unread message is missing its space name" }),
+                )
+            })?;
+            spaces.insert(space);
+        }
+    }
+
+    let total = spaces.len() + threads.len();
+    let mut updated = 0;
+    let mut failures = Vec::new();
+    if !dry_run {
+        let mut targets = spaces
+            .iter()
+            .map(|space| (space, None))
+            .chain(threads.iter().map(|(space, thread)| (space, Some(thread))));
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            if let Some((space, thread)) = targets.next() {
+                spawn_read_state_update(&mut requests, client, command, read_at, space, thread);
+            }
+        }
+        while let Some(update) = requests.join_next().await {
+            let (space, thread, result) = update.map_err(|error| {
+                AppError::local_io(
+                    command,
+                    "Google Chat read-state update task stopped unexpectedly",
+                    json!({ "error": error.to_string(), "updated": updated }),
+                )
+            })?;
+            match result {
+                Ok(_) => updated += 1,
+                Err(error) => failures.push(json!({
+                    "space": space, "thread": thread, "error": error.body(),
+                })),
+            }
+            if let Some((space, thread)) = targets.next() {
+                spawn_read_state_update(&mut requests, client, command, read_at, space, thread);
+            }
+            if cli.progress {
+                write_progress(
+                    command,
+                    "mark.remote_read_state",
+                    updated + failures.len(),
+                    Some(total),
+                    json!({}),
+                );
+            }
+        }
+    }
+    if !failures.is_empty() {
+        return Err(AppError::google_api(
+            command,
+            200,
+            json!({
+                "message": "Some Google Chat read-state updates failed",
+                "updated": updated,
+                "failed": failures,
+            }),
+        ));
+    }
+    Ok(success(
+        command,
+        Some(account),
+        json!({
+            "spaces": spaces,
+            "threads": threads.into_iter().map(|(_, thread)| thread).collect::<Vec<_>>(),
+        }),
+        json!({
+            "count": total,
+            "updated": updated,
+            "dryRun": dry_run,
+            "readAt": read_at,
+            "nextPageToken": page.next_page_token,
+            "truncated": page.truncated,
+        }),
+    ))
+}
+
+fn spawn_read_state_update(
+    requests: &mut tokio::task::JoinSet<(String, Option<String>, Result<Value, AppError>)>,
+    client: &ChatClient,
+    command: &str,
+    read_at: &str,
+    space: &str,
+    thread: Option<&String>,
+) {
+    let client = client.clone();
+    let command = command.to_string();
+    let read_at = read_at.to_string();
+    let space = space.to_string();
+    let thread = thread.cloned();
+    requests.spawn(async move {
+        let result = match &thread {
+            Some(thread) => {
+                client
+                    .update_thread_read_state(&command, &space, thread, &read_at)
+                    .await
+            }
+            None => {
+                client
+                    .update_space_read_state(&command, &space, &read_at)
+                    .await
+            }
+        };
+        (space, thread, result)
+    });
+}
+
+async fn unread_search(
+    client: &ChatClient,
+    command: &str,
+    options: PageOptions<'_>,
+) -> Result<Page<Value>, AppError> {
+    let search_args = SearchArgs {
+        query: vec!["unread".to_string()],
+        space: None,
+        sender: None,
+        after: None,
+        before: None,
+        has_link: false,
+        attachments: false,
+        include_marked: true,
+        expand_threads: false,
+        view: Some(SearchView::Full),
+        order: SearchOrder::CreateTime,
+    };
+    let (page, _, _, _) = client
+        .search_messages(command, &search_args, options, true)
+        .await?;
+    Ok(page)
 }
 
 async fn authenticated_client(

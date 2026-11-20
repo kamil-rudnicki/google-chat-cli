@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "gchat Home",
+  "version": "0.1.0",
+  "description": "Read the Google Chat Home unread list from gchat.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuVy67xivdJImkm3bYrFdfkpBsC50ZcE67DaBPc7j1Dz2cYALAr9xJVAoyUBgQZBnfy2slB8jmQl4rPb6Ea6vHsS7Hy0BZ3pv+XD0spLqB9n4azlCc2qPx6fkiH594FOiHbreDIXNmqBcCzd7HNIhsjydnpyKAjUQ/UVEvjs3yWidYHezuyxx3hrioPD6yvzy/cnDiU36doFO0Vtg/Hw/0EEG0dkmq2ntJSwCmvnAHfQfmpivFvkHZ0QRc+rrVscwwf8A+8FKP2G/C0xxj7XnCYZzBI3uxyKOgLot7aBW0gX96/wbAcYMTfQ3HXQqpRcsOQ5iFei23+H2eUlSWqSBwwIDAQAB",
+  "permissions": ["nativeMessaging", "scripting"],
+  "host_permissions": ["https://chat.google.com/*"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "action": {"default_title": "Reconnect gchat Home"}
+}

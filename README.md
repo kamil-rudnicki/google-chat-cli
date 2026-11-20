@@ -69,7 +69,38 @@ gchat mark read
 # Try Google's remote space read-state update as well.
 # This doesn't clear unread replies inside threads.
 gchat mark read --remote --all --max 5000
+
+# Mark spaces and threads returned by Google Chat's unread search as read.
+# Add --dry-run to preview the targets.
+gchat mark read --remote --include-threads
 ```
+
+## Save unread messages for later
+
+Build the local CLI with `cargo build --release`. The script uses your default `gchat` account and its read-state write permission. It saves message JSON in `~/.config/gchat/read-later.sqlite3`. To use a different account, pass `--account you@example.com` before the subcommand.
+
+```sh
+python3 scripts/chat_read_later.py stash --dry-run
+python3 scripts/chat_read_later.py watch
+python3 scripts/chat_read_later.py status
+python3 scripts/chat_read_later.py restore
+```
+
+`watch` scans once a minute while running. For an existing scheduler, run `stash` once per minute instead. The script commits a copy of each message and the original space or thread read timestamp before changing Google Chat. It retains the copy after restoration.
+
+`restore` keeps restored messages unread until you read them in Chat. The minute loop continues to collect new messages in other conversations and threads. Google Chat uses one read timestamp for a conversation and a separate one for each thread. A new message in the same conversation or thread is saved locally and stays unread while earlier restored messages are unread. The script covers the unread messages returned by the search API, which excludes some items including muted spaces and bot DMs.
+
+## Google Chat Home unread
+
+`gchat home unread` reads the same rows as **Google Chat Home → Unread**, including followed threads. It uses your signed-in Google Chrome profile on macOS or Linux. The command returns conversation and thread previews in `.data.items`, in Home order.
+
+Set up the companion once in the Chrome profile you use for Chat.
+
+1. Build from this checkout with `cargo build --release`, then run `./target/release/gchat home setup`. This registers the current binary as the extension’s local Chrome messaging host.
+2. Open `chrome://extensions` in that profile, turn on Developer mode, and load the `browser-extension` directory with **Load unpacked**.
+3. Run `./target/release/gchat home unread`. Use `--account you@example.com` to check the signed-in account against a specific address. If Chrome disconnects after a binary rebuild or browser restart, reload the extension or click **Reconnect gchat Home** in Chrome’s extensions menu.
+
+Keep Chrome running. The companion can reuse an open Home tab with the right filters. When it needs to load Home or switch filters, it uses a temporary background tab. It reads previews without opening or marking any conversations. Google can change the Home layout, so the command reports an error if it cannot identify the list.
 
 ## Configure Google OAuth Client
 

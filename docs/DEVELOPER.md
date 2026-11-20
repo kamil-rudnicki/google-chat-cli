@@ -22,8 +22,7 @@ gchat chat list
 ```bash
 ./target/release/gchat auth list
 
-echo 'export PATH="/Users/kamil/Developer/google-chat-cli/target/release:$PATH"' >> ~/.zshrc
-source ~/.zshrc
+export PATH="$(pwd)/target/release:$PATH"
 ```
 
 ## Build
@@ -71,7 +70,7 @@ The release workflow builds archives, creates a GitHub Release, and updates `For
 
 ## Brew
 
-For local formula testing before release:
+To build the default branch with Homebrew:
 
 ```bash
 brew install --HEAD ./Formula/gchat.rb

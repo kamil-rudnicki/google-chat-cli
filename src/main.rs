@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod error;
 mod google;
+mod home;
 mod output;
 
 use clap::Parser;
@@ -14,6 +15,18 @@ use serde_json::json;
 
 #[tokio::main]
 async fn main() {
+    if std::env::args()
+        .nth(1)
+        .as_deref()
+        .is_some_and(home::is_chrome_host)
+    {
+        if let Err(error) = home::serve() {
+            let _ = output::write_error(&error);
+            std::process::exit(error.exit_code);
+        }
+        return;
+    }
+
     let result = run().await;
     let exit_code = match result {
         Ok(envelope) => match output::write_success(&envelope) {
