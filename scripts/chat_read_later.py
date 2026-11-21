@@ -2,9 +2,8 @@
 """Save Google Chat unread messages locally and restore their unread status later."""
 
 import argparse
-from collections import defaultdict
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timezone
 import fcntl
 import json
 import os
@@ -19,6 +18,7 @@ import time
 DEFAULT_BINARY = Path(__file__).resolve().parents[1] / "target/release/gchat"
 DEFAULT_DB = Path.home() / ".config/gchat/read-later.sqlite3"
 EPOCH = "1970-01-01T00:00:00Z"
+BOT_SCAN_OVERLAP_SECONDS = 60
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS saved_messages (
     account TEXT NOT NULL,
@@ -40,6 +40,13 @@ CREATE TABLE IF NOT EXISTS restored (
     target TEXT NOT NULL,
     through_time TEXT NOT NULL,
     PRIMARY KEY (account, target)
+);
+CREATE TABLE IF NOT EXISTS bot_scans (
+    account TEXT NOT NULL,
+    space TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    scanned_at INTEGER NOT NULL,
+    PRIMARY KEY (account, space, sender)
 );
 """
 
@@ -91,26 +98,58 @@ def read_state(args, target, cursor=None):
     return chat(args, *command)["data"].get("lastReadTime", EPOCH)
 
 
+def group_message(groups, message):
+    name = message["name"]
+    space, separator, _ = name.partition("/messages/")
+    if not separator or not space.startswith("spaces/"):
+        raise ValueError(f"Invalid Chat message name {name}")
+    target = message["thread"]["name"] if message.get("threadReply") else space
+    if target.startswith("threads/"):
+        target = f"{space}/{target}"
+    if message.get("threadReply") and not target.startswith(f"{space}/threads/"):
+        raise ValueError(f"Invalid thread name for {name}")
+    groups.setdefault(target, {})[name] = message
+
+
 def unread_messages(args):
     response = chat(args, "search", "unread", "--view", "full", "--all", "--include-marked")
     if response["meta"].get("truncated"):
         raise RuntimeError("Google Chat unread search returned an incomplete page set")
-    groups = defaultdict(dict)
+    groups = {}
     for result in response["data"]["results"]:
-        if result.get("read") is not False:
-            continue
-        message = result["message"]
-        name = message["name"]
-        space, separator, _ = name.partition("/messages/")
-        if not separator or not space.startswith("spaces/"):
-            raise ValueError(f"Invalid Chat message name {name}")
-        target = message["thread"]["name"] if message.get("threadReply") else space
-        if target.startswith("threads/"):
-            target = f"{space}/{target}"
-        if message.get("threadReply") and not target.startswith(f"{space}/threads/"):
-            raise ValueError(f"Invalid thread name for {name}")
-        groups[target][name] = message
+        if result.get("read") is False:
+            group_message(groups, result["message"])
     return groups
+
+
+def scan_bot_sources(args, db, groups, failures):
+    scans = []
+    for space, sender, since in args.bot_source:
+        try:
+            scanned_at = int(time.time())
+            previous = db.execute(
+                "SELECT scanned_at FROM bot_scans WHERE account = ? AND space = ? AND sender = ?",
+                (args.account, space, sender),
+            ).fetchone() if db is not None else None
+            if previous:
+                overlap = datetime.fromtimestamp(
+                    previous[0] - BOT_SCAN_OVERLAP_SECONDS, timezone.utc,
+                ).isoformat()
+                since = max(since, overlap, key=cursor_key)
+            page = chat(args, "chat", "messages", space, "--after", since, "--all")
+            if page["meta"].get("truncated") or page["meta"].get("nextPageToken"):
+                raise RuntimeError("Google Chat space listing returned an incomplete page set")
+            listed = {}
+            for message in page["data"]["messages"]:
+                author = message.get("sender") or {}
+                if author.get("type") == "BOT" and author.get("name") == sender:
+                    group_message(listed, message)
+            for target, messages in listed.items():
+                groups.setdefault(target, {}).update(messages)
+            scans.append((space, sender, scanned_at, set(listed)))
+        except (RuntimeError, ValueError, KeyError, OSError, subprocess.TimeoutExpired) as error:
+            failures.append({"source": space, "error": str(error)})
+    return scans
 
 
 def restored_through(db, account, target):
@@ -145,7 +184,10 @@ def stash(args, db):
     saved = 0
     deferred = 0
     failures = []
-    for target, messages in groups.items():
+    scans = scan_bot_sources(args, db, groups, failures)
+    unfinished_targets = set()
+    for target in sorted(groups):
+        messages = groups[target]
         try:
             current = read_state(args, target)
             current_key = cursor_key(current)
@@ -161,6 +203,7 @@ def stash(args, db):
                 with db:
                     saved += save_messages(db, args.account, target, unread)
                 deferred += 1
+                unfinished_targets.add(target)
                 continue
 
             latest = max((message["createTime"] for message in unread), key=cursor_key)
@@ -183,6 +226,19 @@ def stash(args, db):
             updated += 1
         except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as error:
             failures.append({"target": target, "error": str(error)})
+            unfinished_targets.add(target)
+    # Keep listing any range with unread bot messages that still need a write.
+    with db:
+        db.executemany(
+            """INSERT INTO bot_scans VALUES (?, ?, ?, ?)
+               ON CONFLICT(account, space, sender) DO UPDATE
+               SET scanned_at=MAX(bot_scans.scanned_at, excluded.scanned_at)""",
+            (
+                (args.account, space, sender, scanned_at)
+                for space, sender, scanned_at, targets in scans
+                if unfinished_targets.isdisjoint(targets)
+            ),
+        )
     return {
         "saved": saved, "updated": updated, "deferredTargets": deferred, "failures": failures,
     }, int(bool(failures))
@@ -275,6 +331,10 @@ def main():
     parser.add_argument("--account", help="Use this account instead of the gchat default")
     parser.add_argument("--gchat", type=Path, default=DEFAULT_BINARY)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument(
+        "--bot-source", action="append", nargs=3, default=[], metavar=("SPACE", "SENDER", "AFTER"),
+        help="Also list messages by this bot in this space after an RFC 3339 timestamp",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     stash_parser = commands.add_parser("stash", help="Save unread messages and then mark them read")
     stash_parser.add_argument("--dry-run", action="store_true", help="Count matching messages")
@@ -282,12 +342,29 @@ def main():
     commands.add_parser("restore", help="Restore saved unread states until you read them")
     commands.add_parser("status", help="Show saved message count and pending restores")
     args = parser.parse_args()
+    for space, sender, since in args.bot_source:
+        if not re.fullmatch(r"spaces/[\w-]+", space) or not re.fullmatch(r"users/[\w-]+", sender):
+            parser.error("--bot-source requires spaces/ID, users/ID, and a timestamp")
+        cursor_key(since)
     args.account = select_account(args)
 
     if args.command == "status":
         print(json.dumps(status(args)))
     elif args.command == "stash" and args.dry_run:
         groups = unread_messages(args)
+        failures = []
+        scans = scan_bot_sources(args, None, groups, failures)
+        if failures:
+            raise RuntimeError("; ".join(failure["error"] for failure in failures))
+        bot_targets = {target for _, _, _, targets in scans for target in targets}
+        for target in bot_targets:
+            current = cursor_key(read_state(args, target))
+            groups[target] = {
+                name: message for name, message in groups[target].items()
+                if cursor_key(message["createTime"]) > current
+            }
+            if not groups[target]:
+                del groups[target]
         print(json.dumps({"unreadMessages": sum(map(len, groups.values())), "targets": len(groups)}))
     elif args.command == "watch":
         while True:

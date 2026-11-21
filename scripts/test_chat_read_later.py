@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from datetime import datetime
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -26,7 +27,7 @@ def message(target, identifier, created):
 
 class RestoreProtectionTest(unittest.TestCase):
     def setUp(self):
-        self.args = SimpleNamespace(account=ACCOUNT)
+        self.args = SimpleNamespace(account=ACCOUNT, bot_source=[])
         self.db = sqlite3.connect(":memory:")
         self.addCleanup(self.db.close)
         self.cursors = {DM: BEFORE, ROOM: BEFORE, THREAD: BEFORE}
@@ -122,3 +123,44 @@ class RestoreProtectionTest(unittest.TestCase):
         self.assertEqual(script.restore(self.args, self.db)[0]["restored"], 1)
         self.assertEqual(script.restored_through(self.db, ACCOUNT, THREAD), SECOND)
         self.assertEqual(self.cursors[THREAD], BEFORE)
+
+    def test_listed_bot_messages_are_saved_and_deferred_after_restore(self):
+        script.ensure_schema(self.db)
+        self.args.bot_source = [(ROOM, "users/BOT", BEFORE)]
+        bot = {"name": "users/BOT", "type": "BOT"}
+        listed = [
+            dict(message(THREAD, "T1", FIRST), sender=bot),
+            dict(message(ROOM, "R1", SECOND), sender={"name": "users/OTHER", "type": "BOT"}),
+        ]
+        scan_at = int(datetime.fromisoformat("2026-11-20T12:00:30+00:00").timestamp())
+
+        def list_space(args, *command):
+            self.assertEqual(command[:4], ("chat", "messages", ROOM, "--after"))
+            self.assertEqual(command[5:], ("--all",))
+            after = script.cursor_key(command[4])
+            messages = [row for row in listed if script.cursor_key(row["createTime"]) > after]
+            return {"data": {"messages": messages}, "meta": {}}
+
+        with patch.object(script, "chat", list_space), patch.object(script.time, "time") as clock:
+            clock.return_value = scan_at
+            saved, code = script.stash(self.args, self.db)
+            self.assertEqual(code, 0)
+            self.assertEqual(saved["saved"], 1)
+            self.assertEqual(self.patches, [(THREAD, FIRST)])
+            self.assertEqual(script.restore(self.args, self.db)[0]["restored"], 1)
+
+            listed.append(dict(message(THREAD, "T2", SECOND), sender=bot))
+            clock.return_value += 120
+            self.patches.clear()
+            deferred, code = script.stash(self.args, self.db)
+            self.assertEqual(code, 0)
+            self.assertEqual(deferred["saved"], 1)
+            self.assertEqual(deferred["deferredTargets"], 1)
+            self.assertEqual(self.patches, [])
+            self.assertEqual(self.db.execute("SELECT scanned_at FROM bot_scans").fetchone(), (scan_at,))
+
+            self.cursors[THREAD] = FIRST
+            self.assertEqual(script.stash(self.args, self.db)[0]["updated"], 1)
+            self.assertEqual(self.patches, [(THREAD, SECOND)])
+            self.assertEqual(script.stash(self.args, self.db)[0]["updated"], 0)
+            self.assertEqual(self.db.execute("SELECT COUNT(*) FROM saved_messages").fetchone(), (2,))

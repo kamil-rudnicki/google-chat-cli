@@ -90,6 +90,12 @@ python3 scripts/chat_read_later.py restore
 
 `restore` keeps restored messages unread until you read them in Chat. The minute loop continues to collect new messages in other conversations and threads. Google Chat uses one read timestamp for a conversation and a separate one for each thread. A new message in the same conversation or thread is saved locally and stays unread while earlier restored messages are unread. The script covers the unread messages returned by the search API, which excludes some items including muted spaces and bot DMs.
 
+Google Chat search also omits messages posted by Chat apps in spaces. To collect messages from a specific bot, add `--bot-source SPACE SENDER AFTER` before `stash` or `watch`. Pass the space resource name, the bot's user resource name, and an RFC 3339 timestamp for the first scan. Subsequent runs resume from the saved scan position and use the same restore protection.
+
+```sh
+python3 scripts/chat_read_later.py --bot-source spaces/SPACE_ID users/BOT_ID 2026-01-01T00:00:00Z stash
+```
+
 ## Google Chat Home unread
 
 `gchat home unread` reads the same rows as **Google Chat Home → Unread**, including followed threads. It uses your signed-in Google Chrome profile on macOS or Linux. The command returns conversation and thread previews in `.data.items`, in Home order.
